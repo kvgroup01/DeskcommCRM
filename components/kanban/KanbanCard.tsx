@@ -4,7 +4,9 @@ import type { MouseEvent } from "react";
 import { useT } from "@/hooks/i18n/useT";
 import { cn } from "@/lib/utils";
 import { formatValorDoNegocio, MOEDA_PADRAO } from "@/lib/money";
+import { rotuloDaRecorrencia } from "@/lib/leads/valor-recorrente";
 import type { Lead } from "@/lib/types/leads";
+import type { Stage } from "@/lib/kanban/types";
 import { resolveCardState, stageAgeLabel, type CardInput } from "@/lib/kanban/card-state";
 import { KanbanCardActions } from "./KanbanCardActions";
 import { NextActionSlot } from "./NextActionSlot";
@@ -13,6 +15,8 @@ import { ConversaSlot } from "./ConversaSlot";
 import { ScoreSlot } from "./ScoreSlot";
 import { OwnerBadge } from "./OwnerBadge";
 import { ContatoNoCard } from "./ContatoNoCard";
+import { ArquivosNoCard } from "./ArquivosNoCard";
+import { TarefasNoCard } from "./TarefasNoCard";
 
 /** Os dois gestos de seleção que o card sabe relatar. */
 export type GestoDeSelecao = "alterna" | "intervalo";
@@ -45,6 +49,9 @@ interface KanbanCardProps {
   onSelect?: (leadId: string, gesto: GestoDeSelecao) => void;
   /** Abrir o dossiê. Separado de `onSelect`: são gestos e intenções diferentes. */
   onOpen?: (leadId: string) => void;
+  /** Repassados ao menu de ações ("Mover para…"). */
+  etapas?: Stage[];
+  onMoverPara?: (lead: Lead, stageId: string) => void;
 }
 
 function formatValor(cents: number | null, currency: string | null): string | null {
@@ -76,9 +83,25 @@ export function KanbanCard({
   pulseCount = 0,
   onSelect,
   onOpen,
+  etapas,
+  onMoverPara,
 }: KanbanCardProps) {
   const t = useT();
   const value = formatValor(card.valueCents, card.currency);
+  /**
+   * A MENSALIDADE, ao lado do valor único (fatia 1 da #3602): o card escreve
+   * "R$ 3.000 + R$ 500/mês". Os dois números aparecem — nunca a soma, que é
+   * exatamente o que a issue pediu para não fazer — e o negócio de valor único
+   * fica com a linha de sempre (o segundo trecho só existe quando há
+   * recorrência). `semCentavos` acompanha o valor único: o card nunca mostrou
+   * centavos, e a linha tem altura fixa.
+   */
+  const recorrente = rotuloDaRecorrencia(
+    card.recurringValueCents,
+    card.recurringPeriod,
+    card.currency ?? MOEDA_PADRAO,
+    { semCentavos: true, sufixo: t("/mês") },
+  );
   const state = resolveCardState(card, t);
   const age = stageAgeLabel(card.hoursInStage, t);
 
@@ -234,17 +257,36 @@ export function KanbanCard({
                 </button>
               </h3>
             </div>
-            <KanbanCardActions lead={lead} pipelineId={pipelineId} />
+            <KanbanCardActions
+              lead={lead}
+              pipelineId={pipelineId}
+              etapas={etapas}
+              onMoverPara={onMoverPara}
+            />
           </div>
 
-          {/* ② valor — altura reservada mesmo sem valor, senão o card encolhe. */}
+          {/* ② valor — altura reservada mesmo sem valor, senão o card encolhe.
+              `card-valor` é o observável do teste: o MESMO elemento carrega o
+              valor único e a mensalidade, para nenhuma tela de teste achar que
+              "os dois aparecem" olhando dois lugares diferentes. */}
           <p
+            data-testid="card-valor"
             className={cn(
-              "mt-1 h-5 text-xs font-medium leading-5 tabular-nums",
-              value ? "text-text" : "text-text-muted",
+              "mt-1 flex h-5 items-baseline gap-1 text-xs font-medium leading-5 tabular-nums",
+              value || recorrente ? "text-text" : "text-text-muted",
             )}
+            title={recorrente ? `${value ?? ""} + ${recorrente}`.trim() : undefined}
           >
-            {value ?? "—"}
+            {(value || recorrente) && (
+              <span className="truncate">{value ?? t("Sem valor único")}</span>
+            )}
+            {recorrente && (
+              <span className="shrink-0 text-text-muted">
+                {value ? "+ " : ""}
+                {recorrente}
+              </span>
+            )}
+            {!value && !recorrente && "—"}
           </p>
 
           {/* ③ a linha do agente — um slot, três estados, nunca três blocos. */}
@@ -299,13 +341,22 @@ export function KanbanCard({
               negócio não tem nada disso, como a conversa acima. */}
           <ContatoNoCard lead={lead} />
 
-          {/* ④ dono · ⑤ tempo no estágio */}
+          {/* Os campos `file` do funil (#2829): contagem + o documento clicável.
+              Fica junto do contato, entre o conteúdo do negócio e o rodapé de
+              dono/tempo. Some por inteiro quando o funil não declara campo de
+              arquivo — quem não usa o recurso não vê card diferente. */}
+          <ArquivosNoCard lead={lead} />
+
+          {/* ④ dono (+ selo de tarefas) · ⑤ tempo no estágio */}
           <div className="mt-1 flex h-6 items-center justify-between gap-2">
-            <OwnerBadge
-              ownerKind={card.owner.kind}
-              ownerName={card.owner.name}
-              agentVersion={card.owner.agentVersion}
-            />
+            <div className="flex min-w-0 items-center gap-2">
+              <OwnerBadge
+                ownerKind={card.owner.kind}
+                ownerName={card.owner.name}
+                agentVersion={card.owner.agentVersion}
+              />
+              <TarefasNoCard tarefas={lead.tarefas} />
+            </div>
             <span className="shrink-0 whitespace-nowrap text-[11px] tabular-nums text-text-muted">
               {state.showStageAge && age
                 ? `${age} ${t("em")} ${card.stageName}`

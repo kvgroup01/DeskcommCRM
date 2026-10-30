@@ -3,6 +3,7 @@
 import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
 
+import { ipDoCliente } from "@/lib/http/ip-do-cliente";
 import { createClient } from "@/lib/supabase/server";
 import { audit } from "@/lib/audit";
 import {
@@ -10,6 +11,7 @@ import {
   SEM_PREFERENCIA_DE_IDIOMA,
   type ProfileInput,
 } from "@/lib/schemas/settings";
+import { invalidarUsuario } from "@/lib/auth/cache-curto";
 import { resolveActiveOrg, loadAuthUser } from "@/lib/auth/server";
 
 export type UpdateProfileResult =
@@ -28,7 +30,7 @@ export async function updateProfile(input: ProfileInput): Promise<UpdateProfileR
   const supabase = await createClient();
   const hdrs = await headers();
   const requestId = hdrs.get("x-request-id");
-  const ip = hdrs.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+  const ip = ipDoCliente(hdrs);
   const userAgent = hdrs.get("user-agent") ?? null;
 
   const { error } = await supabase.auth.updateUser({
@@ -41,6 +43,8 @@ export async function updateProfile(input: ProfileInput): Promise<UpdateProfileR
       avatar_url: parsed.data.avatar_url ?? null,
     },
   });
+  // #3696: o `getUser` vai para o cache curto; outra sessão da pessoa leria o metadata velho.
+  invalidarUsuario(authUser.id);
   if (error) {
     return { ok: false, error: error.message };
   }

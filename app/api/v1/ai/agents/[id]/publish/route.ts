@@ -19,11 +19,15 @@ import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { publishSchema, PUBLISH_ERROR_CODES } from "@/lib/ai/agents/validation";
+import { toolIdAceito } from "@/lib/mcp/servidor-externo/ids";
 import { VALID_TOOL_IDS } from "@/lib/mcp/tools";
 import { publishAgentVersion } from "@/lib/ai/agents/publish";
 import { traduzir } from "@/lib/i18n/dicionario";
 
 const VALID_TOOL_IDS_RUNTIME = new Set<string>(VALID_TOOL_IDS as readonly string[]);
+
+/** Catálogo compilado + ferramenta remota escolhida (item 6) — ver `toolIdAceito`. */
+const toolIdValido = (t: string) => toolIdAceito(t, VALID_TOOL_IDS_RUNTIME);
 
 export const dynamic = "force-dynamic";
 
@@ -87,7 +91,7 @@ export async function POST(req: NextRequest, ctx: Ctx): Promise<Response> {
   }
 
   const tools = (targetV.tool_ids ?? []) as string[];
-  const invalid = tools.filter((t) => !VALID_TOOL_IDS_RUNTIME.has(t));
+  const invalid = tools.filter((t) => !toolIdValido(t));
   if (invalid.length > 0) {
     return fail("tool_id_invalid", t("tool_ids contém ids inexistentes no catálogo MCP."), 422, {
       requestId,
@@ -99,6 +103,9 @@ export async function POST(req: NextRequest, ctx: Ctx): Promise<Response> {
     orgId: organizationId,
     agentId: id,
     versionId: parsed.data.version_id,
+    // #2156: com quem/publicação a chave por assunto jurídico muda vira
+    // `ai_agent.legal_handoff_changed` com ator e requestId preenchidos.
+    quemPublicou: { actorUserId: authUserId, actorApiTokenId: authz.apiTokenId ?? null, requestId },
   });
 
   if (!result.ok) {

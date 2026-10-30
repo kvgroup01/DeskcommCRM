@@ -81,8 +81,8 @@ describe("o que o motor NÃO conhece continua vindo do catálogo", () => {
  *
  * Depois da #2189 quem ouve o áudio é uma ESCADA
  * (`lib/messaging/media/escada-de-transcricao.ts`): serviço da instalação →
- * chave OpenAI → modelo de conversa da ORGANIZAÇÃO que declare `audio` → nada,
- * com motivo. A organização da issue — Gemini com a chave do Google, SEM conta
+ * chave OpenAI → o próprio OpenRouter, quando a conversa é OpenRouter (#3382)
+ * → modelo de conversa da ORGANIZAÇÃO que declare `audio` → nada, com motivo. A organização da issue — Gemini com a chave do Google, SEM conta
  * OpenAI — transcreve pelo próprio modelo de conversa.
  *
  * Mas o registro continuava com `usa: { provider: "openai", modelId: "whisper-1" }`,
@@ -398,11 +398,11 @@ describe("os três lugares que decidiam sozinhos continuam perguntando à regra"
     expect(fonte, "a rota parou de importar a regra").toMatch(
       /import \{[^}]*enxergaImagem[^}]*\} from "@\/lib\/ai\/pontos\/capacidade-em-vigor"/s,
     );
-    // Os DOIS call sites: a validação do PUT e a lista do GET.
+    // Os TRÊS call sites: catálogo de modelos e lista do GET, além da validação do PUT.
     expect(
       (fonte.match(/enxergaImagem\(\{/g) ?? []).length,
       "um dos dois call sites da rota voltou a ler a coluna direto",
-    ).toBe(2);
+    ).toBe(3);
     expect(
       fonte,
       'voltou o `supports_vision: modelo?.supports_vision ?? false` que a regra substituiu',

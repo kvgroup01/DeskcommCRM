@@ -22,6 +22,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { conversaoDeVendaHandler } from "@/lib/conversoes/envio.handler";
 import { conversaoDeEtapaMetaHandler } from "@/lib/conversoes/etapa-meta.handler";
 import { vendaPeloCanalLigada } from "@/lib/conversoes/venda-pelo-canal";
+import { MOTIVO_LEGIVEL } from "@/lib/conversoes/estado-da-conexao";
+import { EVENTOS_DE_ETAPA_NO_CANAL, rotuloDoEventoDaMeta } from "@/lib/conversoes/regras-meta";
 import { zernioReportConversion } from "@/lib/channels/zernio/conversoes";
 import { resolveZernioCreds } from "@/lib/channels/zernio/credentials";
 import type { EventRow } from "@/lib/event-log/dispatcher";
@@ -371,7 +373,23 @@ describe("o handler escolhe UM caminho", () => {
 
 const ETAPA = "44444444-4444-4444-8444-444444444444";
 const CHAVE_DA_ETAPA = `MetaEtapa:${ETAPA}`;
-const ENTROU_NA_ETAPA = "2026-10-06T16:32:50.000Z";
+/**
+ * ⚠️ RELATIVO, e não uma data fixa — e o porquê é uma bomba que já estourou.
+ *
+ * O transporte direto da Meta RECUSA evento com mais de 7 dias
+ * (`lib/plataformas-de-anuncio/meta/conversions.ts`, teto da plataforma). Este
+ * arquivo usava `"2026-10-06T16:32:50.000Z"`; em 13/10 a data cruzou o teto e o
+ * caso do caminho direto virou vermelho na `main` **sem ninguém tocar em
+ * nada** — verde no CI de 13/10 01:44Z (merge #2805) e vermelho no dia
+ * seguinte. Data fixa como instante de evento é a mesma classe do `[contact]`:
+ * envelhece sozinha.
+ *
+ * Uma hora atrás é recente para o teto, e todas as asserções que dependem do
+ * instante calculam a partir DESTA constante — nada aqui afirma o valor
+ * absoluto. O fixture de venda já usava data relativa (`closed_at`):
+ * `new Date(Date.now() - 60_000)`.
+ */
+const ENTROU_NA_ETAPA = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
 const regraDaEtapa = (metaEvent = "InitiateCheckout") => ({
   meta_ads_conversion_rules: {
@@ -493,7 +511,7 @@ describe("o evento de ETAPA da Meta também sai pelo canal", () => {
     });
   });
 
-  it("evento da Meta fora do vocabulário do canal: pendência `sem_conexao`, sem chamar a rede", async () => {
+  it("evento da Meta fora do vocabulário do canal (ViewContent): a pendência NOMEIA o evento, sem chamar a rede", async () => {
     vi.mocked(createAdminClient).mockReturnValue(
       fakeAdmin({ sessao: CANAL_COM_PONTE, extras: regraDaEtapa("ViewContent") }) as never,
     );
@@ -501,7 +519,39 @@ describe("o evento de ETAPA da Meta também sai pelo canal", () => {
 
     const r = await conversaoDeEtapaMetaHandler.handle(entrouNaEtapa);
 
-    expect(r).toMatchObject({ status: "skipped", detail: "sem_conexao" });
+    expect(r).toMatchObject({ status: "skipped", detail: "evento_fora_do_canal" });
+    expect(gravados.at(-1)).toMatchObject({ status: "skipped", reason: "evento_fora_do_canal" });
     expect(f).not.toHaveBeenCalled();
+  });
+
+  // #2457: `QualifiedLead` está na lista da tela (EVENTOS_DA_META) e fora da do
+  // canal. Sem isto a regra cai em `sem_conexao` e manda a pessoa preencher uma
+  // conexão direta que esta instalação só-com-canal nunca vai ter.
+  it("evento recomendado pela própria tela (QualifiedLead) fora da lista do canal: pendência nomeada, não `sem_conexao`", async () => {
+    vi.mocked(createAdminClient).mockReturnValue(
+      fakeAdmin({ sessao: CANAL_COM_PONTE, extras: regraDaEtapa("QualifiedLead") }) as never,
+    );
+    const f = vi.spyOn(globalThis, "fetch");
+
+    const r = await conversaoDeEtapaMetaHandler.handle(entrouNaEtapa);
+
+    expect(r).toMatchObject({ status: "skipped", detail: "evento_fora_do_canal" });
+    expect(gravados.at(-1)).toMatchObject({
+      status: "skipped",
+      reason: "evento_fora_do_canal",
+      detail: expect.stringContaining("QualifiedLead"),
+    });
+    expect(f).not.toHaveBeenCalled();
+  });
+});
+
+// #2457: o texto da pendência lista o que o ENVIO aceita, pelo nome da tela.
+// Escrito à mão, ele já ofereceu `Purchase` — que não é opção de etapa — e os
+// nomes da Meta em inglês, que a tela não mostra.
+describe("o texto de `evento_fora_do_canal` sai da mesma lista que o envio usa", () => {
+  it("nomeia cada evento que o canal repassa pelo rótulo da tela, e não oferece a compra", () => {
+    const texto = MOTIVO_LEGIVEL.evento_fora_do_canal;
+    for (const e of EVENTOS_DE_ETAPA_NO_CANAL) expect(texto).toContain(rotuloDoEventoDaMeta(e));
+    expect(texto).not.toContain("Purchase");
   });
 });

@@ -6,6 +6,7 @@ import type { Message } from "@/lib/types/messaging";
 import { AudioPlayer } from "./AudioPlayer";
 import { DocumentCard } from "./DocumentCard";
 import { ImageMedia } from "./ImageMedia";
+import { nomeOriginalDoDocumento } from "./media-utils";
 import { StickerMedia } from "./StickerMedia";
 import { VideoMedia } from "./VideoMedia";
 
@@ -62,7 +63,7 @@ export function MediaRenderer({
         agora - new Date(message.created_at).getTime() < TETO_AVISO_TRANSCREVENDO_MS;
       return (
         <div className="flex flex-col gap-2">
-          <AudioPlayer messageId={message.id} isOutbound={isOutbound} />
+          <AudioPlayer messageId={message.id} isOutbound={isOutbound} mime={message.media_mime} />
           {texto ? (
             <>
               <span
@@ -101,6 +102,7 @@ export function MediaRenderer({
           sizeBytes={message.media_size_bytes}
           storagePath={message.media_storage_path}
           isOutbound={isOutbound}
+          fileName={nomeOriginalDoDocumento(message.metadata)}
         />
       );
   }

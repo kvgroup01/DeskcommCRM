@@ -55,7 +55,11 @@ import { lerAtribuicao } from "./leitura-da-atribuicao";
 import { lerValorDaConversa } from "./valor-da-conversa";
 import { lerVendaPeloCanal } from "./venda-pelo-canal";
 import { ehEventoDeEtapa } from "./regras-google";
-import { ehEventoDeEtapaMeta } from "./regras-meta";
+import {
+  EVENTOS_DE_ETAPA_NO_CANAL,
+  ehEventoDeEtapaMeta,
+  rotuloDoEventoDaMeta,
+} from "./regras-meta";
 import { lerRegistro, registraEnvio } from "./registro-de-envio";
 
 const CONSUMER_KEY = "conversoes.venda";
@@ -89,7 +93,9 @@ export async function processarConversao(
   if (
     !qualificacao &&
     row.event_type === "ad_conversion.retry_requested" &&
-    (ehEventoDeEtapa(row.payload.event_name) || ehEventoDeEtapaMeta(row.payload.event_name))
+    (ehEventoDeEtapa(row.payload.event_name) ||
+      ehEventoDeEtapaMeta(row.payload.event_name) ||
+      row.payload.event_name === "LeadSubmitted")
   )
     return ok("skipped", "outro_evento");
   if (!row.entity_id) return ok("skipped", "sem_entidade");
@@ -145,6 +151,11 @@ export async function processarConversao(
   if (!leitura.temAtribuicao) return ok("skipped", leitura.motivo);
 
   const { plataforma, cliqueDeOrigem, telefone } = leitura.atribuicao;
+  // Presente só na captura de PÁGINA (formulário): o ramo do protocolo
+  // pendente monta a atribuição sem identidade de navegador, e o `in` cobre o
+  // tipo sem inventar campo.
+  const identidadeDoNavegador =
+    "identidadeDoNavegador" in leitura.atribuicao ? leitura.atribuicao.identidadeDoNavegador : undefined;
   const identificadoresGoogle =
     "identificadoresGoogle" in leitura.atribuicao
       ? leitura.atribuicao.identificadoresGoogle
@@ -329,8 +340,42 @@ export async function processarConversao(
       }
     }
 
-    await registra("skipped", semValor ? "sem_valor" : credencial.motivo);
-    return ok("skipped", semValor ? "sem_valor" : credencial.motivo);
+    // ─── EVENTO DE ETAPA FORA DO VOCABULÁRIO DO CANAL (#2457) ──────────────
+    //
+    // `eventoNoCanal` é null quando o nome escolhido para a etapa não está em
+    // `ChannelConversionInput` — `QualifiedLead` e `ViewContent` estão na lista
+    // que a própria tela oferece (`EVENTOS_DA_META`) e fora da do canal. Sem
+    // conexão direta não há CAMINHO nenhum para eles, e gravar `sem_conexao`
+    // mandava a pessoa preencher um token que esta instalação só-com-canal
+    // nunca vai ter.
+    //
+    // A decisão é PENDER COM MOTIVO VISÍVEL, não inventar um caminho: mandar
+    // `QualifiedLead` renomeado como `LeadSubmitted` contaria à Meta um
+    // acontecimento que não aconteceu, e o vocabulário do canal é contrato do
+    // provedor, não lista nossa. O motivo novo diz o que fazer — escolher um
+    // evento que o canal repassa, ou configurar a conexão direta.
+    //
+    // Vale mesmo com a chave do canal desligada: ligá-la não resolve, o nome
+    // continua fora da lista. E só para etapa da Meta: sem `eventoMeta` não é
+    // etapa desta plataforma e a pendência segue `sem_conexao` de sempre.
+    const foraDoVocabularioDoCanal =
+      credencial.motivo === "sem_conexao" &&
+      plataforma === "meta_ads" &&
+      Boolean(qualificacao?.eventoMeta) &&
+      eventoNoCanal === null;
+    const motivoDaPendencia = foraDoVocabularioDoCanal
+      ? EVENTO_FORA_DO_CANAL
+      : semValor
+        ? "sem_valor"
+        : credencial.motivo;
+    await registra(
+      "skipped",
+      motivoDaPendencia,
+      foraDoVocabularioDoCanal
+        ? eventoForaDoCanal(registro?.meta_event_name ?? qualificacao?.eventoMeta ?? "")
+        : undefined,
+    );
+    return ok("skipped", motivoDaPendencia);
   }
 
   if (valorPodeVirDaConversa) await lerOValorNaConversa();
@@ -385,6 +430,7 @@ export async function processarConversao(
         : (lead.closed_at ?? row.created_at ?? Date.now()),
     ),
     cliqueDeOrigem,
+    identidadeDoNavegador,
     identificadoresGoogle,
     telefone,
     // A coluna tem `DEFAULT 'BRL'` e um CHECK de ISO-4217; o fallback só cobre a
@@ -477,12 +523,17 @@ export async function processarConversao(
   }
 }
 
-/** Os eventos de etapa que o canal sabe repassar (`ChannelConversionInput`). */
-const EVENTOS_DE_ETAPA_NO_CANAL: readonly ChannelConversionInput["event"][] = [
-  "InitiateCheckout",
-  "LeadSubmitted",
-  "AddToCart",
-];
+/**
+ * O slug do motivo quando o nome da etapa não está em
+ * `EVENTOS_DE_ETAPA_NO_CANAL`. Estável, como todos os outros: o banco guarda o
+ * slug e `MOTIVO_LEGIVEL` (em `estado-da-conexao.ts`) traduz com o que fazer.
+ */
+const EVENTO_FORA_DO_CANAL = "evento_fora_do_canal";
+
+/** O detalhe da pendência: o evento escolhido, pelo rótulo da tela e pelo nome da Meta. */
+function eventoForaDoCanal(nome: string): string {
+  return `Evento escolhido: ${rotuloDoEventoDaMeta(nome)} (${nome}).`;
+}
 
 /**
  * O nome que sai pelo canal: a compra, ou o evento padrão da Meta da etapa — o

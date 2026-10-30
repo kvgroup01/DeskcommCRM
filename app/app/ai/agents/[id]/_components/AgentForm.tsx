@@ -58,6 +58,7 @@ import { BasesDoAgente, type MaterialDoAcervo } from "./BasesDoAgente";
 import { FunisDoAgente, type CoberturaPorFunil } from "./FunisDoAgente";
 import { PublishConfirmDialog } from "./PublishConfirmDialog";
 import { ComandosDoCelular } from "./ComandosDoCelular";
+import { ServidorExternoNoAtendimento } from "./ServidorExternoNoAtendimento";
 import {
   saveAgentDraftAction,
   publishAgentAction,
@@ -122,7 +123,7 @@ interface BaseProps {
    */
   provedoresOferecidos?: readonly string[];
   channelSessions: ChannelSessionLite[];
-  routerMembership?: { routerId: string; routerName: string } | null;
+  routerMembership?: { routerId: string; routerName: string; channelSessionId: string; channelStatus: string | null } | null;
   readOnly?: boolean;
   organizationTimezone?: string;
 }
@@ -187,6 +188,12 @@ interface FormState {
   history_token_window: number;
   handoff_keywords: string[];
   handoff_tool_enabled: boolean;
+  /**
+   * A chave por ASSUNTO JURÍDICO (#2097, #2156) — irmã da de cima, só que ela
+   * não remove a ferramenta: troca a descrição que manda passar em "questão
+   * jurídica". Padrão LIGADO (`?? true` abaixo), como a coluna na versão.
+   */
+  handoff_legal_enabled: boolean;
   proposal_ai_draft_enabled: boolean;
   cases_enabled: boolean;
   split_messages: boolean;
@@ -297,6 +304,7 @@ export function buildState(args: {
       "pessoa real",
     ],
     handoff_tool_enabled: version?.handoff_tool_enabled ?? true,
+    handoff_legal_enabled: version?.handoff_legal_enabled ?? true,
     proposal_ai_draft_enabled: version?.proposal_ai_draft_enabled ?? true,
     cases_enabled: version?.cases_enabled ?? false,
     split_messages: version?.split_messages ?? false,
@@ -361,6 +369,7 @@ function toVersionPayload(s: FormState) {
     history_token_window: s.history_token_window,
     handoff_keywords: s.handoff_keywords,
     handoff_tool_enabled: s.handoff_tool_enabled,
+    handoff_legal_enabled: s.handoff_legal_enabled,
     proposal_ai_draft_enabled: s.proposal_ai_draft_enabled,
     cases_enabled: s.cases_enabled,
     split_messages: s.split_messages,
@@ -516,7 +525,7 @@ export function AgentForm(props: Props) {
    * chave que tinha acabado de escolher.
    */
   const publishBlockReason = React.useMemo(() => {
-    if (!isEdit) return t("Salve o agent antes de publicar.");
+    if (!isEdit) return t("Salve o agente antes de publicar.");
     const motivo = bloqueioDePublicacao({
       temRascunhoVigente: !!props.draft,
       formularioValido: isValid,
@@ -530,6 +539,9 @@ export function AgentForm(props: Props) {
         estadoDaCredencialDaOrg: credSt,
       },
       numero: { estado: channelSession?.status ?? null },
+      roteador: props.routerMembership
+        ? { estadoDoCanal: props.routerMembership.channelStatus }
+        : null,
     });
     if (!motivo) return null;
     switch (motivo.codigo) {
@@ -605,7 +617,7 @@ export function AgentForm(props: Props) {
           toast.error(res.message ?? `${t("Erro")}: ${res.error}`);
           return;
         }
-        toast.success(t("Agent criado."));
+        toast.success(t("Agente criado."));
         router.push(`/app/ai/agents/${res.data!.agent_id}`);
       }
     } finally {
@@ -960,7 +972,7 @@ export function AgentForm(props: Props) {
                   >
                     «{props.routerMembership.routerName}»
                   </Link>{" "}
-                  {t("— o campo de número abaixo não se aplica.")}
+                  {t("— a publicação usa o canal do roteador, sem número próprio neste especialista.")}
                 </p>
               </div>
             )}
@@ -1002,7 +1014,7 @@ export function AgentForm(props: Props) {
                 travava o botão de salvar — o dono de uma instalação nova escrevia
                 o prompt inteiro e não conseguia guardar nada.
               */}
-              {!form.channel_session_id ? (
+              {!form.channel_session_id && !props.routerMembership ? (
                 <p className="text-xs text-muted-foreground">
                   {props.channelSessions.length === 0 ? (
                     <>
@@ -1262,6 +1274,7 @@ export function AgentForm(props: Props) {
               onChange={(v) => patch({ trigger_config: v })}
               disabled={disabled}
               organizationTimezone={props.organizationTimezone}
+              funis={props.funis}
             />
           </Card>
 
@@ -1279,6 +1292,34 @@ export function AgentForm(props: Props) {
                 {t("Deixar o agente chamar uma pessoa quando perceber que não é caso dele")}
               </Label>
             </div>
+            {/* A chave por ASSUNTO JURÍDICO (#2097, #2156): irmã da de cima,
+                mas com efeito diferente — ela NÃO remove a ferramenta, só troca
+                a descrição que mandava passar em "questão jurídica". Por isso
+                ela fica DESABILITADA quando a de cima está desligada: sem a
+                ferramenta não há descrição nenhuma para trocar. Só admin mexe
+                (toda escrita de versão exige admin), e o pedido explícito de
+                pessoa continua passando dos dois lados. */}
+            <div className="flex items-center gap-2">
+              <Switch
+                id="handoff_legal_enabled"
+                checked={form.handoff_legal_enabled}
+                onCheckedChange={(v) => patch({ handoff_legal_enabled: v })}
+                disabled={disabled || !form.handoff_tool_enabled}
+              />
+              <Label
+                htmlFor="handoff_legal_enabled"
+                className={form.handoff_tool_enabled ? undefined : "text-muted-foreground"}
+              >
+                {t(
+                  "Passar para uma pessoa quando o cliente falar de assunto jurídico (Procon, advogado, processo)",
+                )}
+              </Label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "Desligue se assunto jurídico é o trabalho normal deste agente. Quem pede para falar com uma pessoa continua sendo passado.",
+              )}
+            </p>
             <HandoffKeywordsInput
               value={form.handoff_keywords}
               onChange={(v) => patch({ handoff_keywords: v })}
@@ -1402,6 +1443,22 @@ export function AgentForm(props: Props) {
             <ComandosDoCelular
               agentId={props.agent.id}
               inicial={(props.agent.config ?? {}).aceita_comandos_celular}
+              disabled={disabled}
+            />
+          )}
+
+          {/* Servidor MCP externo no atendimento (#2147). Só admin vê e
+              grava; salva em `ai_agents.config.mcp_externo_no_atendimento`.
+              A ESCOLHA das ferramentas do servidor (#3586) vai para o
+              `tool_ids` da versão, pelo mesmo salvar do resto do formulário —
+              por isso o cartão recebe o valor e o setter do formulário, como o
+              `ToolPicker` acima. */}
+          {isEdit && !readOnly && (
+            <ServidorExternoNoAtendimento
+              agentId={props.agent.id}
+              inicial={(props.agent.config ?? {}).mcp_externo_no_atendimento}
+              toolIds={form.tool_ids}
+              onChangeToolIds={(ids) => patch({ tool_ids: ids })}
               disabled={disabled}
             />
           )}

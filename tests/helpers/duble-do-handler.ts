@@ -50,6 +50,26 @@ export interface OpcoesDoDubleDoHandler {
   organizacao?: LinhaDoDuble;
   /** Linhas de `calendar_appointments` lidas pela guarda de agenda. Padrão: `[]`. */
   agenda?: LinhaDoDuble[];
+  /**
+   * O roteamento por número do #3642: `channel_routing_policies` (uma por número
+   * que tem dono) e os donos em `channel_routing_responsibles` (`policy_id`,
+   * `user_id`). Padrão VAZIO = instalação sem um número por vendedor, em que a
+   * guarda do envio não restringe ninguém — o comportamento de antes.
+   */
+  politicasDeNumero?: LinhaDoDuble[];
+  responsaveisDeNumero?: LinhaDoDuble[];
+  /**
+   * As sessões que a guarda do envio lê por lista (`.in("id", ...)`) para saber
+   * se quem envia tem número próprio CONECTADO do mesmo canal (doc 237, 1-B).
+   * Padrão: `[]` — ninguém tem número próprio.
+   */
+  sessoesDeNumero?: LinhaDoDuble[];
+  /**
+   * A linha de `ai_agents` que a conferência da operação do agente lê pela REST
+   * (`assertAgentOperationSupabase`). Função = estado vivo: o teste pausa o
+   * agente entre uma bolha e outra.
+   */
+  agente?: LinhaDoDuble | null | (() => LinhaDoDuble | null);
 }
 
 export interface RetornoDoDubleDoHandler {
@@ -153,6 +173,7 @@ export function criarDubleDoHandler(
       meta_templates: [],
       channel_sessions: [],
       organizations: [],
+      ai_agents: [],
     },
     rpcs: [],
   };
@@ -217,6 +238,17 @@ export function criarDubleDoHandler(
             capturas.filtros.channel_sessions!.push({ coluna, valor });
             return cadeia;
           },
+          // A leitura POR LISTA (`.in("id", ...)`) é a da guarda do número do
+          // atendente (#3642): devolve as linhas de `sessoesDeNumero`, aguardável
+          // como o PostgREST. Fica numa cadeia à parte para a leitura de uma
+          // linha só (`maybeSingle`) continuar exatamente como era.
+          in: (coluna: string, valores: unknown[]) => ({
+            then: (ok: (v: unknown) => unknown, erro?: (e: unknown) => unknown) =>
+              Promise.resolve({
+                data: (opcoes.sessoesDeNumero ?? []).filter((l) => valores.includes(l[coluna])),
+                error: null,
+              }).then(ok, erro),
+          }),
           maybeSingle: async () => ({
             data: {
               metadata: opcoes.channelMetadata ?? {},
@@ -302,6 +334,23 @@ export function criarDubleDoHandler(
               resolve,
               reject,
             ),
+        };
+        return cadeia;
+      }
+
+      if (tabela === "ai_agents") {
+        const cadeia = {
+          select: (colunas = "") => {
+            capturas.selects.ai_agents!.push(colunas);
+            return cadeia;
+          },
+          eq: () => {
+            return cadeia;
+          },
+          maybeSingle: async () => ({
+            data: typeof opcoes.agente === "function" ? opcoes.agente() : (opcoes.agente ?? null),
+            error: null,
+          }),
         };
         return cadeia;
       }
@@ -485,6 +534,51 @@ export function criarDubleDoHandler(
             return cadeia;
           },
         };
+      }
+
+      if (
+        tabela === "channel_routing_policies" ||
+        tabela === "channel_routing_responsibles"
+      ) {
+        // As duas tabelas que dizem "de quem é este número" (#3642). Vazias por
+        // padrão: sem policy, a organização não separa números por vendedor e a
+        // guarda do envio libera. Uma linha de policy + os responsáveis ligam a
+        // regra no teste que a prova.
+        const linhas =
+          tabela === "channel_routing_policies"
+            ? opcoes.politicasDeNumero ?? []
+            : opcoes.responsaveisDeNumero ?? [];
+        const filtros: Array<[string, unknown]> = [];
+        const listas: Array<[string, unknown[]]> = [];
+        const casa = (l: LinhaDoDuble) =>
+          filtros.every(([c, v]) => l[c] === v) &&
+          listas.every(([c, vs]) => vs.includes(l[c]));
+        const cadeia = {
+          select: () => cadeia,
+          eq: (coluna: string, valor: unknown) => {
+            filtros.push([coluna, valor]);
+            return cadeia;
+          },
+          in: (coluna: string, valores: unknown[]) => {
+            listas.push([coluna, valores]);
+            return cadeia;
+          },
+          maybeSingle: async () => ({
+            data: linhas.find(casa) ?? null,
+            error: null,
+          }),
+          // A segunda e a terceira leitura do quadro são AGUARDADAS direto
+          // (`await db.from(...).select(...).eq(...).eq(...)`) e esperam um array,
+          // como o PostgREST. Uma cadeia que não é aguardável devolveria o próprio
+          // objeto, `data` viria `undefined`, e a guarda cairia no caminho "sem
+          // regra" — o teste ficaria verde sem exercitar nada.
+          then: (ok: (v: unknown) => unknown, erro?: (e: unknown) => unknown) =>
+            Promise.resolve({
+              data: linhas.filter(casa),
+              error: null,
+            }).then(ok, erro),
+        };
+        return cadeia;
       }
 
       throw new Error(`duble-do-handler: tabela inesperada '${tabela}'`);

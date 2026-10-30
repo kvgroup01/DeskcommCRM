@@ -8,6 +8,7 @@
  * de cookie).
  */
 import { z } from "zod";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   listContactsHandler,
@@ -17,6 +18,46 @@ import type { McpToolDefinition } from "../types";
 import { CAMPOS_PROPONIVEIS, proporDadoDoContato } from "@/lib/contacts/proposta-de-dado";
 import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { audit } from "@/lib/audit";
+
+/**
+ * Os telefones da ficha para a IA (Spec 31, B1): o tipo e o WhatsApp do
+ * principal, e os extras com a MESMA forma da API (`GET /api/v1/contacts/{id}`).
+ * O cliente aqui é o administrador do MCP (service role, sem RLS): o filtro de
+ * organização é explícito nas duas leituras, e `wa_lid` fica de fora.
+ */
+async function telefonesDaFichaParaIa(
+  supabase: SupabaseClient,
+  organizationId: string,
+  contactId: string,
+) {
+  const { data: principal } = await supabase
+    .from("contacts")
+    .select("phone_type, phone_whatsapp")
+    .eq("organization_id", organizationId)
+    .eq("id", contactId)
+    .maybeSingle();
+  const { data: extras, error } = await supabase
+    .from("contact_phones")
+    .select("phone_number, tipo, whatsapp, rotulo, origem, created_at")
+    .eq("organization_id", organizationId)
+    .eq("contact_id", contactId);
+  if (error) throw new Error(`contact_phones: ${error.message}`);
+  // Ordenado por created_at na memória: a leitura é pequena (poucos números por
+  // ficha) e a ordem fica explícita aqui, como na API.
+  const ordenados = [...(extras ?? [])].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  return {
+    phone_type: principal?.phone_type ?? null,
+    phone_whatsapp: principal?.phone_whatsapp ?? null,
+    additional_phones: ordenados.map((e) => ({
+      phone_number: e.phone_number,
+      type: e.tipo,
+      whatsapp: e.whatsapp,
+      label: e.rotulo,
+      origin: e.origem,
+      created_at: e.created_at,
+    })),
+  };
+}
 
 const searchInputShape = {
   query: z.string().min(1).max(200).describe("Termo de busca (nome, email ou telefone)."),
@@ -160,12 +201,14 @@ export const crmGetContact: McpToolDefinition<typeof getInputShape> = {
           "não é sua para abrir e nada se escreve para ele; siga a conversa com quem está falando.",
       };
     }
+    const telefones = await telefonesDaFichaParaIa(ctx.supabase, ctx.organizationId, contact.id);
     return {
       id: contact.id,
       name: contact.name,
       display_name: contact.display_name,
       email: contact.email,
       phone: contact.phone_number,
+      ...telefones,
       tags: contact.tags ?? [],
       source: contact.source,
       consent: contact.consent ?? {},
@@ -197,10 +240,23 @@ const propostaShape = {
 };
 
 /**
- * ⚠️ Esta ferramenta NÃO grava o dado. Ela cria uma proposta que uma pessoa
- * confirma — e o `description` diz isso ao modelo em primeiro lugar, de
- * propósito: um modelo que acredite ter gravado responderia "pronto, já
- * atualizei seu cadastro" ao cliente, prometendo o que não aconteceu.
+ * ⚠️ Esta ferramenta NÃO grava o dado — com UMA exceção condicionada (#2593): o
+ * TELEFONE de um contato SEM número é gravado na hora, em E.164, com auditoria e
+ * rastro na linha do tempo, MAS SÓ quando a organização liga a opção
+ * `settings.crm.telefone_de_ficha_vazia` (desligada por padrão). Nos demais
+ * casos ela cria uma proposta que uma pessoa confirma, e o `description` diz as
+ * DUAS coisas ao modelo em primeiro lugar, de propósito: um modelo que acredite
+ * ter gravado responderia "pronto, já atualizei seu cadastro" ao cliente,
+ * prometendo o que não aconteceu — e um que ache que nunca grava nada
+ * responderia "vou anotar para alguém confirmar" num caso em que o número já
+ * entrou na ficha.
+ *
+ * ⚠️ O TEXTO NÃO PROMETE A GRAVAÇÃO: como a opção é POR ORGANIZAÇÃO e desligada
+ * por padrão, quem lê a ferramenta não pode decidir antes de chamá-la se o
+ * desfecho foi escrita ou fila — quem responde isso é o RETORNO
+ * (`motivo: "aplicado_automaticamente"`). Por isso o corpo diz "pode ser
+ * gravado" e o `mensagem` do desfecho aplicado é quem autoriza o modelo a dizer
+ * ao cliente que ficou anotado.
  *
  * Ela é de CATÁLOGO, e não nativa do Operador, porque o Operador não monta
  * ToolSet nativo nenhum (zero ocorrências de `tool(` em operator-turn.ts) e só
@@ -212,10 +268,13 @@ export const crmProposeContactField: McpToolDefinition<typeof propostaShape> = {
   name: "crm_propose_contact_field",
   description:
     "Registra uma informação que o cliente forneceu (email, nome, telefone ou data de nascimento) como PROPOSTA para " +
-    "uma pessoa confirmar. NADA é gravado no cadastro por conta desta chamada, e a proposta vence " +
-    "sozinha se ninguém decidir. Nunca diga ao cliente que o cadastro foi atualizado. Recusa se já " +
-    "houver proposta do mesmo campo aguardando decisão, se o valor for igual ao que já está " +
-    "gravado, ou se o contato foi anonimizado.",
+    "uma pessoa confirmar; a proposta vence sozinha se ninguém decidir. EXCEÇÃO: um TELEFONE informado para um " +
+    "contato que está SEM número pode ser gravado NA HORA, em formato internacional E.164 — mas só quando a " +
+    "organização liga essa opção (vem desligada), e quem diz se a gravação aconteceu é o RETORNO desta chamada " +
+    "(motivo \"aplicado_automaticamente\"); sem esse motivo, diga que alguém vai conferir. Nunca é gravado: telefone de " +
+    "quem JÁ tem número no cadastro (trocar exige decisão humana), email, nome e data de nascimento — para esses nunca " +
+    "diga que o cadastro foi atualizado. Recusa se já houver proposta do mesmo campo aguardando decisão, se o valor for " +
+    "igual ao que já está gravado, ou se o contato foi anonimizado.",
   inputSchema: propostaShape,
   category: "write",
   requiresRole: "agent",
@@ -227,9 +286,63 @@ export const crmProposeContactField: McpToolDefinition<typeof propostaShape> = {
       campo: input.campo,
       valor: input.valor,
       trecho: input.trecho ?? null,
+      // ⚠️ `agent_id`, NUNCA `actor.id`: a coluna `crm_lead_activities.actor_agent_id`
+      // tem FK para `ai_agents`, e `actor.id` carrega o id do RUN (ou o do
+      // token, ou a string `agent-engine` dependendo do runtime). Sem
+      // `agent_id` a linha entra como sistema — perde-se a AUTORIA do rastro,
+      // que é ruim, em vez da linha inteira, que é pior. Ver `Actor` em
+      // `lib/api/handlers/types.ts`.
+      agentId: ctx.actor.type === "ai_agent" ? (ctx.actor.agent_id ?? null) : null,
     });
 
+    // Mesmo payload de ator das outras tools de escrita. Inline porque
+    // `retencao.ts` mantém o dele local — extrair para um módulo comum tocaria
+    // um arquivo alheio sem que este trabalho peça isso. Subiu para cima do
+    // `if` porque o desfecho APLICADO também audita (#2593) e é o mesmo ator.
+    const a =
+      ctx.actor.type === "user"
+        ? { actorUserId: ctx.actor.id as string | null, metadataActor: { actor_type: "user" } }
+        : { actorUserId: null, metadataActor: { actor_type: ctx.actor.type, actor_id: ctx.actor.id } };
+
     if (!r.criada) {
+      // ── #2593: o telefone de ficha vazia JÁ ESTÁ na ficha ──────────────────
+      //
+      // Este é o ÚNICO desfecho em que a mensagem pode ser repetida ao
+      // cliente — ele aconteceu de verdade. Os de baixo continuam sendo do
+      // fluxo interno, para o modelo decidir o que fazer em seguida.
+      if (r.motivo === "aplicado_automaticamente") {
+        await audit({
+          action: "contact.field_auto_applied",
+          actorUserId: a.actorUserId,
+          organizationId: ctx.organizationId,
+          resourceType: "contact",
+          resourceId: input.contact_id,
+          requestId: ctx.requestId,
+          // Quem aplicou, quando e o par antes/depois da L-06 — SEM o `trecho`.
+          // A auditoria não é alcançada pela anonimização (só sai pela retenção),
+          // e o trecho é texto livre do cliente: numa clínica pode trazer dado de
+          // saúde. Ele vai para a linha da timeline, que a cascata da LGPD limpa
+          // (`registrarTelefoneAplicadoNaTimeline`).
+          metadata: {
+            ...a.metadataActor,
+            campo: input.campo,
+            old_value: null,
+            new_value: r.telefone,
+            automatico: true,
+            legal_basis: "L-05 transactional (dado informado pelo titular em atendimento iniciado por ele)",
+          },
+        });
+        return {
+          proposta_criada: false,
+          motivo: r.motivo,
+          telefone: r.telefone,
+          mensagem:
+            "este contato estava SEM telefone e o número que a pessoa informou foi GRAVADO no cadastro, " +
+            `em formato internacional (${r.telefone}); pode dizer ao cliente que ficou anotado. ` +
+            "Um número que já existia no cadastro nunca é substituído por esta chamada.",
+        };
+      }
+
       // As mensagens são para o MODELO decidir o que fazer em seguida — e
       // nenhuma delas é para repetir ao cliente. Falam do fluxo interno, não do
       // atendimento.
@@ -247,13 +360,6 @@ export const crmProposeContactField: McpToolDefinition<typeof propostaShape> = {
       return { proposta_criada: false, motivo: r.motivo, mensagem: explicacao[r.motivo] };
     }
 
-    // Mesmo payload de ator das outras tools de escrita. Inline porque
-    // `retencao.ts` mantém o dele local — extrair para um módulo comum tocaria
-    // um arquivo alheio sem que este trabalho peça isso.
-    const a =
-      ctx.actor.type === "user"
-        ? { actorUserId: ctx.actor.id as string | null, metadataActor: { actor_type: "user" } }
-        : { actorUserId: null, metadataActor: { actor_type: ctx.actor.type, actor_id: ctx.actor.id } };
     await audit({
       action: "contact.field_proposed",
       actorUserId: a.actorUserId,

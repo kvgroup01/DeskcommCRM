@@ -1,3 +1,4 @@
+import { comercialExigeHumano } from '@/lib/escalacao/assunto-comercial';
 /** Preview is an execution policy of the real turn, never a simulated queue job. */
 import type pg from 'pg';
 import { hasOpenCaseForContact } from './human-cases';
@@ -9,12 +10,14 @@ import { ferramentasDeAgendaDoAgente, temFerramentaDeAgenda } from './inbound-tu
 import {
   BEFORE_SEND_GATES,
   evaluateBeforeSend,
+  factualClaimGate,
   type Gate,
   type GateContext,
   type GateTraceEntry,
   loadChannelProvider,
   pacingGate,
 } from '../guardrails/before-send';
+import type { ConferenciaDeFato } from '../guardrails/factual-claim';
 import { loadChannelKnobs, loadPacingState } from '../pacing/store';
 import { PACING_DEFAULTS } from '../pacing/defaults';
 import { SPINNING_DEFAULTS } from '../spinning/defaults';
@@ -26,6 +29,7 @@ import { DEFAULT_CHANNEL_PROVIDER } from '@/lib/channels/capabilities';
 import { getToolByName } from '@/lib/mcp/tools';
 import type { Logger } from '../obs/logger';
 import type { Citation } from '@/lib/ai/citations/types';
+import type { FotosPreparadas, MidiaPreparada } from './fotos-do-produto';
 
 export interface TurnPreview {
   kind: 'sandbox' | 'assisted';
@@ -48,12 +52,20 @@ export interface PreviewResult {
   proposals: Array<{ tool: string; arguments: unknown }>;
   impediments: Array<{ code: string; message: string }>;
   /**
-   * O que NÃO impediu o candidato, mas impediria o envio real agora. Só o sandbox
-   * escreve aqui (ver `gatesDoSandbox`); o rascunho assistido continua tratando o
-   * mesmo veto como impedimento.
+   * O que NÃO impediu o candidato, mas o operador precisa ver sobre o ENVIO real:
+   * um gate que o barraria agora, ou uma mídia que não sairia (produto sem fotos,
+   * #2490). O aviso de gate só o sandbox escreve (ver `gatesDoSandbox`) — o rascunho
+   * assistido trata o mesmo veto como impedimento; o de produto sem fotos
+   * (`midia_sem_fotos`) sai nos dois.
    */
   warnings: Array<{ code: string; message: string }>;
   restrictions: string[];
+  /**
+   * A mídia que a resposta USARIA, preparada pelo MESMO caminho do envio real
+   * (#2490): produto resolvido no catálogo, fotos preparadas e anexos previstos.
+   * Falha aqui vira `falha` no registro E impedimento no teste — nunca candidato.
+   */
+  midia: MidiaPreparada[];
 }
 export function newPreviewResult(): PreviewResult {
   return {
@@ -61,6 +73,7 @@ export function newPreviewResult(): PreviewResult {
     proposals: [],
     impediments: [],
     warnings: [],
+    midia: [],
     restrictions: [
       'preview_no_client_effects',
       'writes_require_separate_authorization',
@@ -105,6 +118,11 @@ export async function previewGateContext(
     messagingWindow: { lastInboundAt: lastInbound },
     pacing: {
       knobs: cfg.knobs,
+      // A prévia propõe a RESPOSTA a uma mensagem recebida: vale a janela
+      // `resposta_*` (0495), a mesma que `approved-reply.ts` usa ao enviar o
+      // rascunho aprovado (#1984). Sem isto, o rascunho da prévia seria vetado
+      // pelo `outside_window` da janela de DISPARO (7h-22h) em vez da de resposta.
+      resposta: true,
       state: channel
         ? await loadPacingState(db, org, channel, {
             now,
@@ -142,6 +160,7 @@ export async function previewGateContext(
     // Um Testar que arma diferente da produção faz quem afina o prompt testar contra
     // outro sistema — o mesmo motivo do `agenda` logo acima.
     clinicalClaimEnforced: camadaLigada((await lerCamadasDaOrg(db, org)).afirmacao_clinica, false),
+    commercialRestrictionEnforced: await comercialExigeHumano(db, org),
   };
 }
 export const SCENARIO_READS = new Set([
@@ -158,21 +177,33 @@ export const SCENARIO_READS = new Set([
   'crm_search_knowledge',
 ]);
 /**
- * A cadeia do Testar (sandbox): a de produção, com o veto de pacing rebaixado a aviso.
+ * A cadeia do Testar (sandbox): a de produção, com DOIS vetos rebaixados a aviso.
  *
  * Fora da janela de envio, o `pacingGate` impede que a resposta do modelo
  * apareça como candidato de teste. Janela, aquecimento e limite diário protegem
  * o envio real; o sandbox não envia mensagens. Rebaixar somente esse veto a aviso
  * permite inspecionar o candidato e executar os demais gates de conteúdo.
  *
- * Só o pacing muda, e só aqui. Opt-out, LGPD e os gates de conteúdo continuam vetando;
- * o rascunho assistido (`assisted`, contato real) e a produção seguem com
- * `BEFORE_SEND_GATES` intacta. O veto vira linha `skipped: 'sandbox_send_embargo'` no
- * trace e um aviso explícito no resultado — nunca um `pass` silencioso.
+ * #2923: a conferência de fato (`factual_claim`) segue o mesmo raciocínio AQUI.
+ * Ela agora roda também na prévia — é na prévia do modo assistido que o veredito
+ * vira impedimento visível para quem revisa —, e no Teste não há cliente nem
+ * rascunho a caminho: `contradiz`/`nao_esta_na_base` viram AVISO, como o veto de
+ * pacing, em vez de esconder a resposta que o operador está testando.
+ *
+ * Só o pacing e a conferência de fato mudam, e só aqui. Opt-out, LGPD e os gates
+ * de conteúdo continuam vetando; o rascunho assistido (`assisted`, contato real)
+ * e a produção seguem com `BEFORE_SEND_GATES` intacta. O veto vira linha
+ * `skipped: 'sandbox_send_embargo'` no trace e um aviso explícito no resultado —
+ * nunca um `pass` silencioso.
+ *
+ * A comparação é INLINE, e não um `Set` de módulo: há testes que substituem este
+ * módulo inteiro por um dublê (`vi.mock(..., () => ({ runBeforeSend }))`), e ler
+ * `pacingGate.name` no topo do arquivo derrubaria todos eles no import. Aqui a
+ * leitura acontece só quando o Teste de fato avalia a cadeia.
  */
 function gatesDoSandbox(avisos: Array<{ code: string; message: string }>): readonly Gate[] {
   return BEFORE_SEND_GATES.map((gate) =>
-    gate.name !== pacingGate.name
+    gate.name !== pacingGate.name && gate.name !== factualClaimGate.name
       ? gate
       : {
           name: gate.name,
@@ -190,6 +221,58 @@ function gatesDoSandbox(avisos: Array<{ code: string; message: string }>): reado
         },
   );
 }
+/**
+ * A MESMA preparação de mídia do envio real, dentro do dry-run (#2490).
+ *
+ * `preparar` é injetado por quem monta a prévia e resolve a `prepararFotosDoProduto`
+ * do caminho de produção — mesma query no catálogo, mesma cópia. Aqui só se
+ * traduz o desfecho para o VOCABULÁRIO do teste:
+ *
+ * - código sem produto, ou foto que não copiou → `falha` (o teste fica VERMELHO;
+ *   o envio real degrada para só texto, o teste não pode fingir que passou);
+ * - produto sem fotos → conta zerada, sem `falha`: nada a enviar, dito claramente;
+ * - sem `preparar` injetado → também `falha`: mídia que ninguém preparou não
+ *   pode atravessar o teste como se tivesse sido validada.
+ */
+async function prepararMidiaNoDryRun(
+  preparar: ((codigo: string) => Promise<FotosPreparadas>) | undefined,
+  codigo: string,
+): Promise<MidiaPreparada> {
+  const semProduto = (falha: { code: string; message: string }): MidiaPreparada => ({
+    codigo,
+    produtoResolvido: false,
+    fotosCadastradas: 0,
+    fotosPreparadas: 0,
+    anexos: [],
+    falha,
+  });
+  if (!preparar)
+    return semProduto({
+      code: 'midia_nao_preparada',
+      message:
+        'A mídia desta resposta não foi preparada no teste — não há como afirmar que as fotos ' +
+        'saíriam no envio real. Corrija a preparação e execute o teste de novo.',
+    });
+  const preparadas = await preparar(codigo);
+  if (!preparadas.ok) return semProduto({ code: preparadas.code, message: preparadas.message });
+  const registro: MidiaPreparada = {
+    codigo,
+    produtoResolvido: true,
+    fotosCadastradas: preparadas.tinha,
+    fotosPreparadas: preparadas.fotos.length,
+    anexos: [...preparadas.fotos],
+  };
+  const faltaram = preparadas.tinha - preparadas.fotos.length;
+  if (faltaram > 0)
+    registro.falha = {
+      code: 'midia_nao_preparada',
+      message:
+        `${faltaram} foto(s) do produto ${JSON.stringify(codigo)} não puderam ser preparadas no ` +
+        'teste. Em produção o texto sairia sem elas; aqui o teste falha de propósito, para o ' +
+        'problema não chegar só no atendimento real.',
+    };
+  return registro;
+}
 /** Unknown tools fail closed. A write proposal never calls its original execute. */
 export function applyPreviewPolicy(
   tools: ToolSet,
@@ -198,6 +281,21 @@ export function applyPreviewPolicy(
   citations: () => Citation[],
   semanticClassifier?: (body: string) => Promise<NonNullable<GateContext['semanticPromise']>>,
   liveContext?: () => Partial<GateContext>,
+  /**
+   * #2490 — a `prepararFotosDoProduto` do caminho de produção, injetada pelo
+   * turno que tem banco e Storage. Sem ela o `produto_codigo` NÃO passa: o
+   * teste falha a mídia em vez de aprovar texto com foto pendente.
+   */
+  prepararMidia?: (codigo: string) => Promise<FotosPreparadas>,
+  /**
+   * #2923 — a MESMA conferência de fato do turno automático
+   * (`criarConferidorDeAfirmacoes`), com as evidências consultadas NESTE turno
+   * da prévia. Sem ela o `evaluateBeforeSend` da prévia recebia o contexto sem
+   * `factualClaim`, e a camada 6.3 nem era avaliada: o rascunho do modo
+   * assistido — justamente o que alguém revisa antes de o cliente receber — saía
+   * com a afirmação de fato sem conferência e sem observação para calibrar.
+   */
+  conferirAfirmacoes?: (candidata: string) => Promise<ConferenciaDeFato>,
 ): ToolSet {
   return Object.fromEntries(
     Object.entries(tools).map(([name, definition]) => {
@@ -223,18 +321,71 @@ export function applyPreviewPolicy(
                 args && typeof args === 'object' && 'body' in args && typeof args.body === 'string'
                   ? args.body
                   : '';
+              // #2490 — A MESMA preparação do envio real, e na MESMA ordem: o
+              // `produto_codigo` que `crm_search_products` devolveu resolve o
+              // produto no catálogo e prepara as fotos ANTES da cadeia (é o que
+              // `inbound-turn.ts` faz no caminho de produção). Aqui o preparo é
+              // o único efeito — nenhuma mensagem sai pelo canal de entrega e
+              // nada é gravado em conversa nenhuma, como `preview_no_client_effects`
+              // manda.
+              const produtoCodigo =
+                args && typeof args === 'object' && 'produto_codigo' in args
+                  ? typeof args.produto_codigo === 'string'
+                    ? args.produto_codigo
+                    : undefined
+                  : undefined;
+              if (produtoCodigo !== undefined && produtoCodigo.trim() !== '') {
+                const midia = await prepararMidiaNoDryRun(prepararMidia, produtoCodigo);
+                p.result.midia.push(midia);
+                // Falha de mídia NÃO vira candidato: sem degradar para só texto,
+                // sem aprovar o teste com a foto pendente (issue #2490, item 6).
+                if (midia.falha) {
+                  p.result.impediments.push({ code: midia.falha.code, message: midia.falha.message });
+                  return {
+                    ok: false,
+                    error: { code: midia.falha.code, message: midia.falha.message },
+                  };
+                }
+                // Produto sem foto é desfecho LEGÍTIMO do envio real — não é
+                // falha, mas o operador tem de ler que nenhuma imagem sairia.
+                if (midia.fotosCadastradas === 0 && !p.result.warnings.some((w) => w.code === 'midia_sem_fotos'))
+                  p.result.warnings.push({
+                    code: 'midia_sem_fotos',
+                    message:
+                      `O produto ${JSON.stringify(midia.codigo)} não tem fotos cadastradas: ` +
+                      'nenhuma imagem seria enviada no envio real — só o texto.',
+                  });
+              }
               const avisos: Array<{ code: string; message: string }> = [];
+              // #2923 — as duas perguntas ao Jev da cadeia (promessa semântica,
+              // F4-02, e conferência de fato, 6.3) saem juntas, como em
+              // `runBeforeSend`: em série a prévia pagaria as duas idas-e-voltas
+              // uma atrás da outra. A conferência é a MESMA do turno automático,
+              // com as evidências consultadas NESTE turno — e é ela que grava a
+              // observação com o rótulo do Jev (na prévia, com o par em aberto:
+              // quem fecha é a resposta aprovada).
+              const [semanticPromise, factualClaim] = await Promise.all([
+                semanticClassifier ? semanticClassifier(body) : Promise.resolve(null),
+                conferirAfirmacoes ? conferirAfirmacoes(body) : Promise.resolve(null),
+              ]);
               const result = evaluateBeforeSend(
                 {
                   ...ctx,
                   ...liveContext?.(),
                   body,
-                  semanticPromise: semanticClassifier ? await semanticClassifier(body) : null,
+                  semanticPromise,
+                  factualClaim,
                 },
                 p.kind === 'sandbox' ? gatesDoSandbox(avisos) : BEFORE_SEND_GATES,
               );
               if (result.veto) {
                 p.result.impediments.push({ code: result.veto.code, message: result.veto.message });
+                if (result.veto.code === 'commercial_requires_human' &&
+                    !p.result.proposals.some((x) => x.tool === 'crm_request_human_handoff')) {
+                  p.result.proposals.push({ tool: 'crm_request_human_handoff', arguments: {
+                    reason: 'Valores e negociação: atendimento exclusivamente humano.',
+                  } });
+                }
                 return {
                   ok: false,
                   error: { code: result.veto.code, message: result.veto.message },

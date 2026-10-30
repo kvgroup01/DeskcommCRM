@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 import { z } from "zod";
 import { ok, fail } from "@/lib/api/wrappers";
+import { audit } from "@/lib/audit";
 import { loadAuthUser } from "@/lib/auth/server";
 import { orgAtivaDaApi, requireRole } from "@/lib/auth/require-role";
 import { createClient } from "@/lib/supabase/server";
@@ -290,7 +291,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (itemsErr) {
       // Fonte sem item nenhum é fonte vazia: melhor desfazer do que deixar uma
       // linha que promete conteúdo e nunca vai indexar nada.
-      await admin.from("ai_knowledge_sources").delete().eq("id", ksId);
+      await admin.from("ai_knowledge_sources").delete().eq("organization_id", activeOrg.orgId).eq("id", ksId);
       console.error("[ai-knowledge-sources] insert dos itens falhou:", itemsErr.message);
       return fail("internal_error", t("Erro ao gravar o conteúdo do material."), 500, { requestId });
     }
@@ -312,6 +313,18 @@ export async function POST(req: NextRequest): Promise<Response> {
   if (emitErr) {
     console.warn("[ai-knowledge-sources] emit_event falhou (não bloqueia):", emitErr.message);
   }
+
+  // Quem pôs este material no acervo? A trilha responde — com tipo e contagem,
+  // nunca com o texto (a tabela é append-only e a cascata da LGPD não a alcança).
+  void audit({
+    action: "ai.knowledge_source_created",
+    actorUserId: authz.user.id,
+    organizationId: activeOrg.orgId,
+    resourceType: "ai_knowledge_source",
+    resourceId: ksId,
+    requestId,
+    metadata: { source_type: tipo, items_count: itemsCount },
+  });
 
   // A resposta DIZ se a indexação vai acontecer. Sem isto a tela prometia
   // "começa em instantes" para uma organização sem chave de embedding, e o

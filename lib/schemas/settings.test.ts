@@ -131,6 +131,14 @@ describe("notificationPrefsSchema", () => {
 });
 
 describe("pipelineConfigPatchSchema", () => {
+  // A porta da comanda do ganho (#1477): o zod descarta chave desconhecida, então
+  // tirá-la do schema faria a caixa da tela gravar NADA, sem erro nenhum.
+  it("mantém `comanda_no_ganho` booleano e recusa qualquer outra forma", () => {
+    const r = pipelineConfigPatchSchema.safeParse({ comanda_no_ganho: true });
+    expect(r.success && r.data.comanda_no_ganho).toBe(true);
+    expect(pipelineConfigPatchSchema.safeParse({ comanda_no_ganho: "true" }).success).toBe(false);
+  });
+
   it("accepts partial vocabulary patch", () => {
     const r = pipelineConfigPatchSchema.safeParse({
       vocabulary: { lead: "Cliente", won: "Pago" },
@@ -208,5 +216,50 @@ describe("pipelineConfigPatchSchema — motivos de perda com categoria (#1537)",
       pipelineConfigPatchSchema.safeParse({ lost_reasons: Array.from({ length: 51 }, (_, i) => `m${i}`) })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("pipelineConfigPatchSchema — entrada do Inbox por funil (#3011)", () => {
+  const STAGE = "aaaaaaaa-1111-4111-8111-111111111111";
+
+  it("aceita a chave ligada com a etapa declarada — e é isso que o gravador persiste", () => {
+    const r = pipelineConfigPatchSchema.safeParse({
+      entrada_do_inbox: { ativa: true, stage_id: STAGE },
+    });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.entrada_do_inbox).toEqual({ ativa: true, stage_id: STAGE });
+  });
+
+  it("aceita desligar sem perder a etapa escolhida", () => {
+    // A tela desliga a chave e religa depois: se desligar apagasse o
+    // `stage_id`, religar obrigaria a escolher a etapa de novo (e quem
+    // desligou achando que era temporário perderia a configuração).
+    const r = pipelineConfigPatchSchema.safeParse({ entrada_do_inbox: { ativa: false } });
+    expect(r.success).toBe(true);
+  });
+
+  it("recusa `ativa` que não é booleano — string vira chave ligada em qualquer leitura frouxa", () => {
+    expect(
+      pipelineConfigPatchSchema.safeParse({ entrada_do_inbox: { ativa: "true", stage_id: STAGE } })
+        .success,
+    ).toBe(false);
+    expect(
+      pipelineConfigPatchSchema.safeParse({ entrada_do_inbox: { stage_id: STAGE } }).success,
+    ).toBe(false);
+  });
+
+  it("recusa `stage_id` que não tem forma de identificador", () => {
+    // Forma não é existência: quem confere se a etapa é deste funil e está
+    // aberta é a consulta (`lib/leads/nascimento-do-lead.ts`). O que o schema
+    // recusa aqui é gravar lixo que só falharia no ingest, longe de quem salvou.
+    expect(
+      pipelineConfigPatchSchema.safeParse({ entrada_do_inbox: { ativa: true, stage_id: "1" } })
+        .success,
+    ).toBe(false);
+  });
+
+  it("não mexe em quem não tem a chave — ausente é o comportamento de hoje", () => {
+    const r = pipelineConfigPatchSchema.safeParse({ vocabulary: { lead: "Cliente" } });
+    expect(r.success && r.data.entrada_do_inbox).toBeUndefined();
   });
 });

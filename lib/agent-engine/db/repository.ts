@@ -28,6 +28,12 @@ export type { InboxRefKind } from '@/lib/ai/inbox-destino';
 export type InboxKind =
   | 'case_stale'
   | 'canal_mudo_sem_numero'
+  // (migration 0589, issue #2389) A pausa de uma conexão era silenciosa para
+  // todo mundo menos para quem clicou. O audit registrava, mas audit é
+  // histórico para quem procura — a Central é comunicação. O item nasce no
+  // `channel.disabled` e se resolve sozinho no `channel.enabled`/arquivamento,
+  // sem clique (laço do canal-mudo, só que instantâneo).
+  | 'canal_pausado'
   | 'appointment_outcome_required'
   | 'appointment_recovery_review'
   | 'qr_rescan'
@@ -106,6 +112,20 @@ export type InboxKind =
   // receberam mensagem enquanto ela estava parada. A IA não respondeu e não vai
   // responder sozinha, então quem abre o Inbox é uma pessoa. Nasce sem referência.
   | 'org_reativada'
+  // (migration 0601) Cobrança do revendedor: os avisos da régua ao admin da
+  // empresa (sem referência) e o de 80% do teto de IA do plano (ref_kind plano).
+  | 'cobranca'
+  // (migration 0614) O admin da plataforma trocou o e-mail de login de uma
+  // pessoa da equipe. O aviso leva o nome e a data, nunca o endereço — é
+  // gravado pela rota `PATCH /api/v1/admin/tenants/[id]/members/[userId]/email`.
+  | 'email_de_login_trocado'
+  // (migration 0655, issue #2529) O prazo da tarefa pede gente ANTES de vencer
+  // (`task_due`) e pede quando ela vence sem conclusão (`task_overdue`). Dois
+  // kinds, e não um: quem lê a Central decide pelo rótulo se ainda dá tempo de
+  // concluir ou se já é reagendamento — e o cron que os emite decide qual dos
+  // dois dispara pela MESMA lista (`lib/tarefas/preferencia-de-lembrete.ts`).
+  | 'task_due'
+  | 'task_overdue'
   | 'other';
 
 export interface InboxItemRow {

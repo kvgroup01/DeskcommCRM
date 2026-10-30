@@ -87,16 +87,15 @@ export const PROVEDORES = [
     id: PROVEDOR_POR_ASSINATURA,
     rotulo: "OpenAI pela assinatura (ChatGPT)",
     quandoUsar:
-      "Para quem já paga o ChatGPT: a conversa sai pela mesma conta do Codex, sem chave de API nenhuma — e, se a assinatura não estiver disponível ou falhar, a chamada cai sozinha na chave da empresa.",
+      "Conecte sua conta pessoal do ChatGPT dentro dos limites da assinatura; para operação em volume, prefira uma chave de API da organização. Uma chave da própria organização pode servir de reserva.",
     // A assinatura não se aponta para outro endereço nem sincroniza catálogo:
     // o endpoint é o da própria OpenAI e o modelo vem do que a conta tem.
     aceitaEndpointProprio: false,
     catalogoSincronizavel: false,
     // Não existe chave a copiar aqui: quem conecta é o painel de Credenciais
-    // desta instalação (OAuth por PKCE com o mesmo login do Codex). O link
-    // aponta para o serviço cuja ASSINATURA este provedor usa — o host é o
-    // mesmo da fiação (`OPENAI_CODEX_ENDPOINT`), por isso a catraca de marca
-    // vê um destino só, já declarado como FORNECEDOR.
+    // desta instalação (Sign in with ChatGPT por PKCE). O link aponta para o
+    // serviço cuja ASSINATURA este provedor usa; catálogo e inferência SIWC
+    // usam a API pública oficial em `api.openai.com`.
     ondePegarAChave: "https://chatgpt.com/",
     // Placeholder do campo de chave, que para este provedor não tem o que
     // colar: o texto já diz a recusa antes de a pessoa tentar.

@@ -1,5 +1,6 @@
 "use server";
 
+import { ipDoCliente } from "@/lib/http/ip-do-cliente";
 import { supportWriteError } from "@/lib/impersonate/support";
 import { headers } from "next/headers";
 import { revalidatePath } from "next/cache";
@@ -116,13 +117,18 @@ export async function updateMarcaDaOrganizacao(
 
   const hdrs = await headers();
   const requestId = hdrs.get("x-request-id");
-  const ip = hdrs.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+  const ip = ipDoCliente(hdrs);
   const userAgent = hdrs.get("user-agent") ?? null;
 
-  // Os dois campos vazios significam "volte ao que vem da instalação", e é `null`
+  // Os campos vazios significam "volte ao que vem da instalação", e é `null`
   // que a função entende como apagar a chave `branding` — gravar `{}` deixaria um
   // envelope vazio que o resolvedor teria de aprender a ignorar.
-  const limpar = parsed.data.app_name === null && parsed.data.accent_hex === null;
+  const limpar =
+    parsed.data.app_name === null &&
+    parsed.data.accent_hex === null &&
+    parsed.data.accent_dark_hex === null &&
+    parsed.data.email_from_name === null &&
+    parsed.data.email_reply_to === null;
   const marca = limpar
     ? null
     : {
@@ -133,6 +139,18 @@ export async function updateMarcaDaOrganizacao(
         // "mudou?" ser uma pergunta com resposta.
         accent_hex:
           parsed.data.accent_hex === null ? null : normalizarHex(parsed.data.accent_hex),
+        // O par da cor (#2482): mesma normalização, mesma regex da função SQL.
+        accent_dark_hex:
+          parsed.data.accent_dark_hex === null
+            ? null
+            : normalizarHex(parsed.data.accent_dark_hex),
+        // O remetente da automação (#3287, fatia 1). Texto livre: a função SQL
+        // não os valida (só `accent_hex`), então quem garantiu a forma foi o
+        // `marcaDaOrganizacaoSchema` acima — o endereço de resposta, inclusive.
+        // Vão no MESMO objeto `branding` porque é a mesma prancheta da tela e o
+        // merge da função preserva só o `logo_path`, que tem escritor próprio.
+        email_from_name: parsed.data.email_from_name,
+        email_reply_to: parsed.data.email_reply_to,
         updated_by: authUser.id,
         updated_at: new Date().toISOString(),
       };
@@ -187,6 +205,10 @@ export async function updateMarcaDaOrganizacao(
       fields_changed: Object.keys(parsed.data),
       accent_definido: parsed.data.accent_hex !== null,
       nome_definido: parsed.data.app_name !== null,
+      // Forma, nunca identidade: o endereço de resposta NÃO entra na trilha —
+      // só o fato de a organização ter definido um remetente (#3287).
+      remetente_da_automacao_definido:
+        parsed.data.email_from_name !== null || parsed.data.email_reply_to !== null,
     },
   });
 

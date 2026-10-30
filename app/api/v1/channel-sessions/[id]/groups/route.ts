@@ -11,7 +11,7 @@ import { chaveDaRequisicao, comIdempotencia } from "@/lib/api/idempotency";
 import { fail, ok } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import { criarDepsDeGestao, criarGrupo, TETO_DE_PARTICIPANTES } from "@/lib/grupos/gestao";
-import { alternarGrupo, criarDepsDeGrupos, GrupoError, listarGruposDoNumero } from "@/lib/grupos/servico";
+import { alternarGrupo, criarDepsDeGrupos, definirIaDoGrupo, GrupoError, listarGruposDoNumero } from "@/lib/grupos/servico";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -22,16 +22,36 @@ import { falhaDeGestao, telefoneDigitado } from "./_comum";
 export const dynamic = "force-dynamic";
 
 const idSchema = z.string().uuid();
-const corpoSchema = z.object({
-  group_chat_id: z.string().regex(/^[\d-]+@g\.us$/),
-  subject: z.string().max(200).nullable().optional(),
-  enabled: z.boolean(),
-});
+/**
+ * UM PUT troca UMA das duas chaves por grupo (#2729): `enabled` (entrar na
+ * inbox — mexe no filtro do WhatsApp) ou `ia_responde` (a IA passar a
+ * responder — preferência local). As duas juntas no mesmo body são recusadas:
+ * são dois gestos na tela, e aceitar os dois em uma chamada deixaria o
+ * resultado dependente da ordem interna aqui dentro.
+ */
+const corpoSchema = z
+  .object({
+    group_chat_id: z.string().regex(/^[\d-]+@g\.us$/),
+    subject: z.string().max(200).nullable().optional(),
+    enabled: z.boolean().optional(),
+    ia_responde: z.boolean().optional(),
+  })
+  .refine((c) => c.enabled !== undefined || c.ia_responde !== undefined, {
+    message: "o body precisa trazer enabled ou ia_responde",
+  })
+  .refine((c) => !(c.enabled !== undefined && c.ia_responde !== undefined), {
+    message: "troque uma chave por vez",
+  });
 
 const STATUS: Record<GrupoError["code"], number> = {
   sessao_nao_encontrada: 404,
   canal_sem_grupos: 409,
   filtro_nao_confirmado: 502,
+  // #2729 — a chave da IA só existe para grupo já LIGADO: sem linha na fila não
+  // há mensagem nossa na inbox, logo não há nada para a IA responder. A recusa
+  // é do DOMÍNIO (o grupo está fora da fila), não do transporte — por isso 409
+  // e não 502.
+  grupo_desligado: 409,
 };
 
 const criarSchema = z.object({
@@ -84,12 +104,28 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
   const corpo = corpoSchema.safeParse(await req.json().catch(() => null));
   if (!id.success || !corpo.success) return fail("validation_error", "dados inválidos", 400, { requestId });
   try {
-    const r = await alternarGrupo(criarDepsDeGrupos(createAdminClient()), {
+    const deps = criarDepsDeGrupos(createAdminClient());
+    // #2729 — a chave da IA vem PRIMEIRA porque é a exceção: o body traz UMA
+    // das duas (o schema recusa as duas juntas), e a organização vem SEMPRE da
+    // sessão autenticada — um `organization_id` forjado no body é ignorado,
+    // como na chave de cima.
+    if (corpo.data.ia_responde !== undefined) {
+      const r = await definirIaDoGrupo(deps, {
+        organizationId: authz.org.orgId,
+        channelSessionId: id.data,
+        groupChatId: corpo.data.group_chat_id,
+        iaResponde: corpo.data.ia_responde,
+        actorUserId: authz.user.id,
+        requestId,
+      });
+      return ok(r, { requestId });
+    }
+    const r = await alternarGrupo(deps, {
       organizationId: authz.org.orgId,
       channelSessionId: id.data,
       groupChatId: corpo.data.group_chat_id,
       subject: corpo.data.subject ?? null,
-      ligar: corpo.data.enabled,
+      ligar: corpo.data.enabled as boolean,
       actorUserId: authz.user.id,
       requestId,
     });

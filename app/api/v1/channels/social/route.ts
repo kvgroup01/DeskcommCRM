@@ -7,6 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { env } from "@/lib/env";
+import { traduzirLimiteDoPlano } from "@/lib/cobranca/limites";
 import { checkRateLimit } from "@/lib/ai/dispatcher/rate-limit";
 import {
   SOCIAL_NETWORKS,
@@ -21,6 +22,7 @@ import {
   socialChannels,
   connectSocialInbox,
   disconnectSocialAccount,
+  ressincronizarAssinaturaSocial,
 } from "@/lib/channels/social/store";
 
 export const dynamic = "force-dynamic";
@@ -41,6 +43,9 @@ const inputSchema = z.discriminatedUnion("action", [
     })
     .strict(),
   z.object({ action: z.literal("inbox"), account_id: z.string().regex(/^[a-f0-9]{24}$/) }).strict(),
+  // Ressincroniza a URL da assinatura de webhook pela origem atual, sem arquivar
+  // o canal nem criar um novo (#2863). Mesmo account_id das demais ações.
+  z.object({ action: z.literal("resync"), account_id: z.string().regex(/^[a-f0-9]{24}$/) }).strict(),
   z
     .object({ action: z.literal("health"), account_id: z.string().regex(/^[a-f0-9]{24}$/) })
     .strict(),
@@ -156,6 +161,13 @@ export async function POST(req: Request) {
       result = { configured: true };
     } else if (body.action === "inbox") {
       result = await connectSocialInbox(db, auth.org.orgId, body.account_id, publicBase());
+    } else if (body.action === "resync") {
+      result = await ressincronizarAssinaturaSocial(
+        db,
+        auth.org.orgId,
+        body.account_id,
+        publicBase(),
+      );
     } else if (body.action === "disconnect") {
       result = await disconnectSocialAccount(
         db,
@@ -212,14 +224,18 @@ export async function POST(req: Request) {
           ? "channel.social_disconnected"
           : body.action === "unlink"
             ? "channel.social_desvinculado"
-            : "channel.social_configured",
+            : body.action === "resync"
+              ? "channel.social_webhook_ressincronizado"
+              : "channel.social_configured",
       organizationId: auth.org.orgId,
       actorUserId: auth.user.id,
       resourceType: "social_connections",
       requestId,
       metadata: {
         operation: body.action,
-        ...(body.action === "disconnect" || body.action === "unlink"
+        ...(body.action === "disconnect" ||
+        body.action === "unlink" ||
+        body.action === "resync"
           ? { ...(result as object) }
           : {}),
         ...(body.action === "disconnect" ? { account_id: body.account_id } : {}),
@@ -227,6 +243,9 @@ export async function POST(req: Request) {
     });
     return ok(result, { requestId, headers });
   } catch (error) {
+    const limite = traduzirLimiteDoPlano(error, auth.user.idioma);
+    if (limite)
+      return fail(limite.code, limite.message, 409, { requestId, headers, details: limite.details });
     return failure(error, requestId);
   }
 }

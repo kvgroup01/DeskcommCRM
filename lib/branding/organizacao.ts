@@ -78,6 +78,10 @@ export function marcaDaOrganizacaoDeSettings(settings: unknown): MarcaDaOrganiza
   return {
     app_name: texto(envelope.app_name),
     accent_hex: texto(envelope.accent_hex),
+    // A segunda semente (#2482), pelo MESMO tratamento dos campos do par: só
+    // vira chave quando é string — um `accent_dark_hex` numérico desceria para
+    // `envelopeDeSemente` e apontaria o campo errado no diagnóstico.
+    ...(texto(envelope.accent_dark_hex) ? { accent_dark_hex: texto(envelope.accent_dark_hex) } : {}),
     // Caminho no bucket, nunca URL — quem grava é `fn_definir_logo_da_organizacao`
     // (migration 0158), que assevera o prefixo contra o `organization_id` DENTRO
     // do banco. `texto()` pelo mesmo motivo dos outros dois: um `logo_path` que
@@ -85,6 +89,13 @@ export function marcaDaOrganizacaoDeSettings(settings: unknown): MarcaDaOrganiza
     // partir de um objeto.
     logo_path: texto(envelope.logo_path),
     ...(texto(envelope.logo_dark_path) ? { logo_dark_path: texto(envelope.logo_dark_path) } : {}),
+    // O remetente da AUTOMAÇÃO (#3287, fatia 1) — as duas chaves que a tela de
+    // marca grava ao lado do nome e da cor. Entram pelo MESMO tratamento dos
+    // pares: só viram chave quando são string, e só quando têm conteúdo — um
+    // `email_from_name: 7` desceria para o cabeçalho do e-mail como texto
+    // inventado, e uma chave AUSENTE é o que faz o envio sair como sempre saiu.
+    ...(texto(envelope.email_from_name) ? { email_from_name: texto(envelope.email_from_name) } : {}),
+    ...(texto(envelope.email_reply_to) ? { email_reply_to: texto(envelope.email_reply_to) } : {}),
   };
 }
 

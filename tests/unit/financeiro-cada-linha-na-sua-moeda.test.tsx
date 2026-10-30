@@ -58,6 +58,9 @@ describe("lançamentos do período", () => {
           lancamento("l-eur", "EUR", "Material importado"),
         ]}
         contas={[]}
+        // A régua de DIGITAÇÃO (#3367) não é o assunto aqui — estas linhas já
+        // gravadas seguem a moeda da própria (#1531); o teste só precisa de uma.
+        moeda="BRL"
         podeLancar={false}
         onCriar={vi.fn()}
         onPagar={vi.fn()}
@@ -90,6 +93,7 @@ describe("lançamentos recorrentes", () => {
         podeEditar={false}
         carregando={false}
         onCriar={vi.fn()}
+        onEditar={vi.fn()}
         onInativar={vi.fn()}
       />,
     );

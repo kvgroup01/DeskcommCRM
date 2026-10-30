@@ -179,9 +179,19 @@ describe("a sétima cópia não nasce", () => {
       motivo: "o mesmo rótulo de modelo, no caminho em que a escolha já veio da tela",
     },
     {
+      arquivo: "app/api/v1/conversations/[id]/transfer/route.ts",
+      trecho: "display_name: linha?.display_name ?? null,",
+      motivo: "a prévia da transferência devolve as colunas do CANAL (channel_sessions) cruas; quem rotula é a tela",
+    },
+    {
       arquivo: "app/api/v1/channels/official/route.ts",
       trecho: "displayName: data?.display_name ?? null,",
       motivo: "nome do NÚMERO no canal oficial da Meta, não de contato",
+    },
+    {
+      arquivo: "app/api/v1/channels/official/route.ts",
+      trecho: 'display_name: existente?.display_name || (validacao.verifiedName ?? "Canal oficial"),',
+      motivo: "nome interno do CANAL oficial preservado ao salvar a credencial de novo, não de contato",
     },
     {
       arquivo: "app/api/v1/contacts/_handler.ts",
@@ -212,11 +222,6 @@ describe("a sétima cópia não nasce", () => {
       arquivo: "components/connections/RedesSociaisClient.tsx",
       trecho: "{orfao.display_name ?? orfao.account_id}",
       motivo: "rótulo do CANAL órfão (channel_sessions), não de contato",
-    },
-    {
-      arquivo: "components/inbox/ConversationListItem.tsx",
-      trecho: "canal?.phone_number ?? canal?.display_name ?? null",
-      motivo: "número da EMPRESA por onde a conversa chegou, não o do cliente",
     },
     {
       arquivo: "lib/ai/classifier-models.ts",

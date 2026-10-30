@@ -59,8 +59,8 @@ function EmptyChart() {
 const tooltipStyle = {
   borderRadius: "8px",
   fontSize: "12px",
-  border: "1px solid hsl(var(--border))",
-  background: "hsl(var(--popover))",
+  border: "1px solid var(--color-border)",
+  background: "var(--color-surface)",
 };
 
 export function UsageChart({ payload }: Props) {
@@ -87,7 +87,7 @@ export function UsageChart({ payload }: Props) {
 
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <ChartCard title={t("Quanto gastou por dia (R$)")}>
+      <ChartCard title={t("Quanto gastou por dia (US$)")}>
         {!hasCost ? (
           <EmptyChart />
         ) : (
@@ -171,7 +171,7 @@ export function UsageChart({ payload }: Props) {
         )}
       </ChartCard>
 
-      <ChartCard title={t("Tempo de resposta por dia (segundos)")}>
+      <ChartCard title={t("Tempo de uma chamada à IA por dia (segundos)")}>
         {!hasLatency ? (
           <EmptyChart />
         ) : (

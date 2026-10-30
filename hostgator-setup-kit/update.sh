@@ -72,7 +72,11 @@ if [ "${SINGLE_SERVER:-0}" = "1" ]; then
   if sincronizar_smtp_do_gotrue; then
     dc_supabase up -d --no-deps auth >/dev/null 2>&1 || c_ylw "⚠ Não consegui reiniciar o auth do Supabase com o SMTP do CRM."
   else
-    c_ylw "⚠ Sem SMTP no CRM: 'esqueci a senha' e a confirmação de cadastro não enviam e-mail. Configure em /admin/email e rode o update.sh de novo."
+    # #2755 — o aviso diz POR QUE rodar de novo: o app não leva o SMTP de
+    # /admin/email ao GoTrue, quem leva é a chamada logo acima. Sem o porquê,
+    # "rode de novo" parecia ordem sem motivo. Não citamos o painel de
+    # Atualização: o botão dele só aparece quando há versão nova.
+    c_ylw "⚠ Sem SMTP no CRM: 'esqueci a senha' e a confirmação de cadastro não enviam e-mail. Configure em /admin/email e rode bash hostgator-setup-kit/update.sh de novo (ele roda mesmo sem versão nova) — é ele que leva o SMTP ao serviço de login."
   fi
 fi
 
@@ -82,6 +86,34 @@ fi
 # saem do script mais abaixo, e se o cron dependesse deles a atualização pela
 # tela nunca ligaria justamente em quem já está em dia. É idempotente.
 setup_update_agent_cron
+
+# ── 0+. O par VAPID também em quem não vai atualizar nada ───────────────────
+# A tela de Notificações manda rodar a atualização, sem --force. Quem já está na
+# última versão sai pela saída "nada a atualizar" logo abaixo, e quem segue a
+# `main` sai pela recusa de versão anterior: sem esta chamada, nos dois o par
+# nunca nasceria. Só na lacuna, nunca troca um par existente (D6).
+#
+# Aqui o par só vai para o .env. Quem sobe o app e o worker de novo para lê-lo é
+# `subir_para_ler_o_par`, e SÓ nas duas saídas sem atualização: no caminho de
+# atualização de verdade o `up -d` lá embaixo já recria os dois, e as recusas de
+# uma atualização real (registro fora, árvore suja) prometem não ter parado
+# nada — ali o par liga na atualização que vier depois.
+PAR_VAPID_CRIADO=""
+PAR_LIGADO_AGORA=""
+completar_par_vapid .env
+subir_para_ler_o_par() {
+  [ -n "$PAR_VAPID_CRIADO" ] || return 0
+  PAR_VAPID_CRIADO=""
+  # `never`: recriar para ler o .env, nunca trocar de imagem. Com tag de canal
+  # (`always`) o compose baixaria o topo do canal antes de recriar — app novo sem
+  # o baseline, logo antes de uma recusa que diz que nada mudou.
+  if ( export APP_PULL_POLICY=never WORKER_PULL_POLICY=never; dc up -d --no-deps app worker ) >/dev/null 2>&1; then
+    PAR_LIGADO_AGORA=1
+    c_grn "$(t "✓ app e worker reiniciados para ligar os avisos com o app fechado")"
+  else
+    c_ylw "$(t "⚠ Criei as chaves dos avisos com o app fechado, mas não consegui reiniciar o app e o worker. Os avisos ligam quando eles reiniciarem, o que acontece sozinho na próxima atualização.")"
+  fi
+}
 
 # ── 1. Tem atualização mesmo? ────────────────────────────────────────────────
 step "Procurando atualizações"
@@ -147,6 +179,7 @@ if [ -n "$MESMA_TAG" ] && [ -z "$FORCE" ] && ! image_desatualizada; then
     c_ylw "    bash hostgator-setup-kit/update.sh --to $TARGET_TAG --force"
   fi
   c_grn "✓ Você já está na versão mais recente ($TARGET_TAG). Nada a atualizar."
+  subir_para_ler_o_par
   exit 0
 fi
 
@@ -162,9 +195,10 @@ fi
 if [ -z "$FORCE" ] && [ -z "$MESMA_TAG" ]; then
   is_already_in_head "$TARGET_TAG" && CONTIDA=0 || CONTIDA=$?
   case "$CONTIDA" in
-    0) refuse "A versão $TARGET_TAG é ANTERIOR à que já está instalada neste servidor.
+    0) subir_para_ler_o_par
+       refuse "A versão $TARGET_TAG é ANTERIOR à que já está instalada neste servidor.
      Instalar ela seria voltar no tempo e desligar coisas que você já tem.
-     Não mexi em nada: nem no banco, nem no app — está tudo como estava.
+     Não mexi em nada${PAR_LIGADO_AGORA:+ além das chaves dos avisos com o app fechado}: nem no banco, nem na versão do app — está tudo como estava.
      Se você REALMENTE quer voltar para a $TARGET_TAG, rode:
        bash hostgator-setup-kit/update.sh --to $TARGET_TAG --force" ;;
     2) refuse "Não consegui ter CERTEZA de que a versão $TARGET_TAG é mais nova que a instalada
@@ -175,6 +209,19 @@ if [ -z "$FORCE" ] && [ -z "$MESMA_TAG" ]; then
      servidor. Para instalar assim mesmo, por sua conta:
        bash hostgator-setup-kit/update.sh --to $TARGET_TAG --force" ;;
   esac
+fi
+
+# Aqui já sabemos que há atualização real ou --force. Em ARM64, a release
+# inteira (quatro imagens + WAHA efetiva) é conferida no índice OCI antes de
+# backup, checkout, banco ou contêiner: recusar aqui não deixa nada pela metade.
+# Em AMD64 não há este pré-voo: toda imagem publicada tem amd64, e o preflight
+# geral abaixo (#1955) já confere as quatro imagens em toda arquitetura.
+# Com DESKCOMM_BUILD_LOCAL o escape da #1955 vale aqui também: quem pediu
+# construção local não depende do registro, e recusá-la aqui a anularia
+# justamente com o registro fora.
+PLATAFORMA_HOST="$(plataforma_oci_do_host "$(uname -m 2>/dev/null || true)" 2>/dev/null || true)"
+if [ "$PLATAFORMA_HOST" = linux/arm64 ] && ! build_local_pedido && ! preflight_plataforma_atualizacao "$TARGET_TAG" "$PLATAFORMA_HOST"; then
+  refuse "A versão $TARGET_TAG não está completa para $PLATAFORMA_HOST ou a WAHA configurada é incompatível. Não alterei banco, imagens nem código. Confira o registry e repita."
 fi
 if [ -n "$MESMA_TAG" ] && [ -n "$FORCE" ]; then
   # Com --force na mesma tag ninguém conferiu a imagem: quem chega aqui pediu
@@ -213,11 +260,49 @@ else
   c_grn "✓ preflight — as quatro imagens da $TARGET_TAG estão prontas no registro."
 fi
 
+# ── 1.6 A volta fica de prontidão (#2757) ──────────────────────────────────
+# Daqui para baixo a atualização VAI mexer no que está no ar. Esta marca é o
+# que autoriza o agente do host a voltar sozinho, sem ninguém do outro lado,
+# se o app não responder mais depois disto — é o caso em que o painel de
+# atualização está justamente dentro do app que parou, e nenhum botão salva.
+#
+# Nasce SÓ aqui: antes do preflight nada foi tocado (o `refuse` devolve RC 3 e
+# a versão atual segue no ar), e uma marca sem atualização de verdade seria
+# rollback disparado sobre uma queda qualquer. E só com a versão que ESTAVA no
+# ar — instalação fora de release não tem tag para onde voltar, e aí
+# `vigia_armar` fica calada em vez de prometer uma volta impossível.
+#
+# Quem DESARMA é o agente, quando vê o app respondendo (ou quando a janela de
+# validade fecha) — não este script: ele termina com o app saudável, mas é a
+# vigência de alguns minutos depois que prova que a versão nova continuou de
+# pé sob os primeiros requests e sob o primeiro cron novo.
+#
+# EXCETO quando esta execução É a volta: andar pra trás não arma. Sem isto a
+# própria volta gravaria uma marca nova (o `vigia_encerrar` do agente corre
+# ANTES de chamar este script), e o agente — vendo o app ainda fora do ar,
+# porque a queda não era da versão — voltaria de novo daqui a dois ciclos,
+# para a release que acabou de ser largada. As duas trocas se alternariam a
+# cada ~10 min, com backup e migration de cada vez, até a janela de duas
+# horas fechar: o laço que a issue apontou como risco principal. Uma ida,
+# uma vigília — quem está saindo não vigia.
+VOLTA_NO_TEMPO=""
+if [ -z "$MESMA_TAG" ]; then
+  # O MESMO critério da recusa lá em cima (e do agente): alvo contido no que
+  # roda aqui = versão anterior. `2` (não consegui ter certeza) não é volta
+  # comprovada, e aí armar continua sendo o lado seguro.
+  is_already_in_head "$TARGET_TAG" && VOLTA_NO_TEMPO=1 || VOLTA_NO_TEMPO=""
+fi
+if [ -n "$VOLTA_NO_TEMPO" ]; then
+  c_ylw "Volta para a $TARGET_TAG — a vigência pós-atualização não re-arma: quem está voltando não vigia."
+else
+  vigia_armar "$CURRENT_TAG"
+fi
+
 # ── 2. Backup de segurança ANTES de tocar no banco ───────────────────────────
 if [ -z "$SKIP_BACKUP" ]; then
   step "Backup de segurança (antes de mexer no banco)"
   if bash "$KIT_DIR/backup.sh"; then
-    c_grn "✓ backup feito — se algo der errado, dá pra restaurar (restore.sh)."
+    c_grn "✓ backup feito. Ele só volta num banco VAZIO, não por cima deste (restore.sh; ver hostgator-setup-kit/README.md)."
   else
     if [ -n "${DESKCOMM_AGENT_REPORT:-}" ] || [ ! -t 0 ]; then
       die "O backup preventivo falhou. Atualização automática interrompida para proteger os dados."
@@ -313,7 +398,7 @@ BANCO_INCOMPLETO=""
 BANCO_RESTANTE=""
 # O que fazer, dito por causa, no passo 4 e de novo no fim. Rodar o update.sh sem
 # --force responderia "já está na versão mais recente" e não tocaria no banco.
-# O restore vem por ÚLTIMO: ele desfaz também o que o CRM gravou desde o backup.
+# O backup não é saída aqui: o restore.sh só restaura num banco vazio (#2120).
 orientar_banco_incompleto() {
   # As duas metades SOMAM: uma lista pode ter disputa (que repetir cura) e erro de
   # permissão ou de dado (que não). Escolher uma só escondia a ação possível.
@@ -333,7 +418,8 @@ orientar_banco_incompleto() {
     *)
       c_ylw "  O resto dos erros acima repetir não cura: guarde a mensagem e peça ajuda." ;;
   esac
-  c_ylw "  Só em último caso, volte ao backup feito antes desta atualização (restore.sh)."
+  c_ylw "  O backup feito antes desta atualização NÃO volta por cima deste banco (o restore.sh só"
+  c_ylw "  restaura num banco vazio). Se precisar voltar o banco ao estado anterior, peça ajuda."
 }
 if [ -f supabase/baseline.sql ]; then
   # O aviso PRIMEIRO: entre pausar e anunciar, quem estivesse com a tela aberta
@@ -553,7 +639,7 @@ if [ -f supabase/baseline.sql ]; then
     c_red "   sem erro nenhum, e isso é indistinguível de 'não há dados'."
     printf '%s\n' "$faltando" | sed 's/|/ na tabela /; s/^/   • /' | head -20
     c_ylw "   O log do banco está em .deskcomm-banco.log — mande-o para o suporte."
-    c_ylw "   Para voltar ao estado anterior: bash restore.sh"
+    c_ylw "   O backup NÃO volta por cima deste banco (restore.sh só em banco vazio): peça ajuda."
     # ⛔ E A ATUALIZAÇÃO PARA AQUI.
     #
     # Antes ela seguia: imprimia este bloco vermelho e ia para o passo 5, que
@@ -663,6 +749,11 @@ export APP_IMAGE="${IMG_APP}:${VERSAO_ALVO}"
 export WORKER_IMAGE="${IMG_WORKER}:${VERSAO_ALVO}"
 export SCHEDULER_IMAGE="${IMG_SCHEDULER}:${VERSAO_ALVO}"
 export VOICE_AGENT_IMAGE="${IMG_VOICE_AGENT}:${VERSAO_ALVO}"
+# `gravar_imagens` também cria, só na lacuna, o par VAPID dos avisos com o app
+# fechado (`completar_par_vapid`), e nunca troca um par que já existe. Mora lá
+# dentro, e não numa linha daqui, porque é ela que o update.sh ANTIGO chama
+# depois de reler o kit: assim o par chega já na primeira atualização, antes do
+# pull e do `up -d` abaixo.
 gravar_imagens .env "$VERSAO_ALVO"
 
 # Os segredos da chamada de voz (spec 18), para quem instalou antes dela existir.
@@ -674,25 +765,39 @@ gravar_imagens .env "$VERSAO_ALVO"
 VOZ_CRIADA="$(completar_segredos_da_voz .env)" || VOZ_CRIADA=""
 [ -n "$VOZ_CRIADA" ] && c_ylw "  (preparei as credenciais da chamada de voz no .env — ela segue DESLIGADA)"
 
-# `dc pull` falha se alguma das três imagens ainda não existir no registro — o
+# `dc pull` falha se alguma das três imagens ainda não existir no registro
+# (quatro com o profile `telefonia`, que liga o voice-agent) — o
 # que acontece numa instalação atualizando para a primeira versão publicada
-# depois desta mudança, ou se um run de publicação quebrou. Nesse caso o compose
-# ainda tem `build:` ao lado do `image:` do worker e do scheduler, então o
-# `up -d` os constrói localmente: pior que puxar, melhor que não atualizar.
+# depois desta mudança, ou se um run de publicação quebrou. Worker, scheduler e
+# voz têm `build:` ao lado do `image:`, e o Compose os constrói sozinho em
+# QUALQUER falha de pull (medido — não só na de arquitetura): pior que puxar,
+# melhor que não atualizar. O `app` fica SEM `build:` de propósito (#1060): se a
+# imagem dele não veio, o `up -d` logo abaixo FALHA e quem decide é o portão
+# `build_local_permitido` — construir aqui ou recusar, conforme o registro
+# responde ou não.
 if ! dc pull; then
-  # A mensagem distingue os dois casos porque a consequência é oposta, e uma
-  # frase tranquilizadora sobre o caso errado é o pior desfecho possível: o
-  # `worker` e o `scheduler` têm `build:` ao lado do `image:` e o `up -d` os
-  # constrói; o `app` NÃO tem, então se for a imagem dele que falta, o `up -d`
-  # falha logo abaixo e a guarda dele constrói a versão aqui — e dizer "sigo
-  # assim mesmo" teria sido mentira.
+  # A mensagem distingue os dois casos porque a CAUSA é diferente, e uma frase
+  # tranquilizadora sobre o caso errado é o pior desfecho possível. Se a do app
+  # veio, o que faltar em worker, scheduler ou voz o Compose constrói sozinho no
+  # `up -d` (medido: qualquer falha de pull, não só a de arquitetura). Se a do
+  # app NÃO veio, ele não tem `build:` no compose de produção de propósito: o
+  # `up -d` falha e quem decide é o portão `build_local_permitido` — com o
+  # registro respondendo ele constrói a versão aqui; sem resposta do registro ele
+  # RECUSA, de propósito (guarda da #1955). "Construído aqui" sem essa ressalva
+  # prometeria justamente o que o portão nega no pior caso. Os dois diagnósticos
+  # também contam coisas distintas: "o app veio e falta outra peça" × "o app não
+  # veio", que aponta para a versão ainda não publicada (ou o pacote privado).
   if dc pull app >/dev/null 2>&1; then
     c_ylw "⚠ Não consegui puxar todas as imagens da versão ${VERSAO_ALVO}."
     c_ylw "  A do app veio; o que faltar é construído aqui (mais lento, mesmo resultado)."
   else
     c_ylw "⚠ Não consegui puxar a imagem do APP na versão ${VERSAO_ALVO}."
     c_ylw "  Causas comuns: a versão ainda está publicando, ou o pacote está privado no GHCR."
-    c_ylw "  Vou tentar subir mesmo assim — se falhar, rode de novo em alguns minutos."
+    c_ylw "  Vou tentar subir mesmo assim — se o up -d falhar, quem decide o passo"
+    c_ylw "  seguinte é a recuperação: com o registro respondendo ela constrói as"
+    c_ylw "  imagens desta versão aqui (15 a 25 min); sem resposta do registro ela"
+    c_ylw "  recusa, de propósito, para não gastar a memória desta VPS."
+    c_ylw "  Se não subir, rode de novo em alguns minutos."
   fi
 fi
 # A rede do proxy externo é declarada como EXTERNA no compose: se ela sumiu
@@ -701,13 +806,25 @@ fi
 # external, but could not be found" — e este script roda sozinho pelo agent.sh,
 # então ninguém está lendo a tela para decifrar isso. Mesma função do install.sh.
 garantir_rede_do_proxy
+# Antes de qualquer `up -d`: a configuração NOVA do Caddy (Caddyfile desta
+# versão + caddy-sites/ do operador + imagem já puxada) passa pela conferência.
+# Recusada, nem o `up -d` do parque nem a recriação lá embaixo tocam no proxy
+# que está no ar (#2724; ver conferir_config_do_proxy em _common.sh).
+PROXY_RECUSA=""
+case "${REVERSE_PROXY:-caddy}" in
+traefik|npm|cloudflared) ;;
+*) conferir_config_do_proxy || true ;;
+esac
 # O `up -d` falha por imagem ausente no disco e, com ele, a atualização inteira:
 # numa VPS de arquitetura diferente da das imagens publicadas o `pull` acima não
-# traz nada, e o `app` — ao contrário do worker e do scheduler — não tem `build:`
-# ao lado do `image:`, então o Compose não tem como construí-lo. Sem esta guarda
-# o script terminava como se tivesse dado certo e o dono ficava na versão velha
-# sem saber; pelo botão "Atualizar" do site, pior: o agente roda sozinho no cron
-# e não há ninguém lendo a tela para desconfiar.
+# traz nada. Worker, scheduler e voz têm `build:` ao lado do `image:` e o
+# Compose os constrói sozinho em QUALQUER falha de pull (medido — tag
+# inexistente, registro fora por DNS, "no matching manifest"); o `app` NÃO tem,
+# de propósito (#1060) — é a falta da imagem dele que faz o `up -d` falhar e
+# entrega a decisão a esta guarda, única que julga quando o registro não
+# responde. Sem ela o script terminava como se tivesse dado certo e o dono
+# ficava na versão velha sem saber; pelo botão "Atualizar" do site, pior: o
+# agente roda sozinho no cron e não há ninguém lendo a tela para desconfiar.
 #
 # O gatilho é o CÓDIGO DE SAÍDA, nunca o texto do erro — arquitetura da VPS, tag
 # ainda publicando, pacote privado no registro e registro fora do ar caem no
@@ -728,7 +845,7 @@ garantir_rede_do_proxy
 # de ERRO, onde este ponto aqui nunca chega a ser alcancado.
 manutencao_desce
 CONSTRUIU_AQUI=""
-if ! dc up -d; then
+if ! subir_o_parque; then
   # ── O PORTÃO DO BUILD LOCAL (#1955, critério 2) ─────────────────────────
   # O gatilho continua sendo o CÓDIGO DE SAÍDA do `up -d` (nunca o texto do
   # erro — arquitetura, tag publicando, pacote privado e registro fora caem no
@@ -776,13 +893,11 @@ fi
 # proxy" em TODA atualização de quem usa proxy externo: alarme falso, num
 # momento em que o dono precisa confiar no que está lendo.
 case "${REVERSE_PROXY:-caddy}" in
-traefik|npm)
+traefik|npm|cloudflared)
   c_grn "✓ proxy externo (${REVERSE_PROXY}): o Caddy não é usado aqui — nada a recarregar"
   ;;
 *)
-  dc up -d --force-recreate --no-deps caddy >/dev/null 2>&1 \
-    && c_grn "✓ proxy recarregado com a configuração desta versão" \
-    || c_ylw "⚠ não consegui recriar o proxy — rode: docker compose $(dc_files) up -d --force-recreate caddy"
+  recriar_o_proxy || true
   ;;
 esac
 
@@ -832,26 +947,9 @@ if [ -n "$ok" ]; then
   fi
   # Dito aqui pelo mesmo motivo do pin: é no fim que o dono lê.
   if [ -n "$AVISO_SITE_URL" ]; then
-    DOM_AVISO="$(printf '%s' "${NEXT_PUBLIC_APP_URL:-https://SEU_DOMINIO}")"
-    cat <<AVISO
-
-$(c_ylw "  ─── CONFIRA UMA COISA, UMA VEZ SÓ ─────────────────────")
-
-  Os e-mails de acesso (esqueci minha senha, confirmação de cadastro,
-  aceite de convite) levam para o endereço que estiver em Authentication
-  → URL Configuration, no painel do Supabase. Instalações feitas antes de
-  o instalador perguntar o token do Supabase ficaram com o padrão de
-  projeto novo, \`http://localhost:3000\`, que só existe na máquina de
-  quem desenvolve — e aí ninguém consegue redefinir a própria senha.
-
-  Vale conferir. Se já estiver com os valores abaixo, não há nada a fazer:
-
-       Site URL:       ${DOM_AVISO}
-       Redirect URLs:  ${DOM_AVISO%/}/auth/confirm
-
-  Este aviso não se repete — para o instalador cuidar disso sozinho, rode
-  o update com \`export SUPABASE_ACCESS_TOKEN=sbp_...\` no ambiente.
-AVISO
+    # O texto depende da topologia (single-server não tem o que conferir):
+    # ver aviso_do_site_url, em _common.sh.
+    aviso_do_site_url "${NEXT_PUBLIC_APP_URL:-https://SEU_DOMINIO}"
     : > "$MARCA_AVISO_SITE_URL" 2>/dev/null || true
   fi
 else

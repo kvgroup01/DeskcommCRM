@@ -46,6 +46,7 @@ import {
   type LinhaDaInstalacao,
 } from "@/lib/branding/resolve";
 import { marcaDaOrganizacaoSchema } from "@/lib/schemas/settings";
+import { dicaDoRelatorio, type VocabularioDaEmpresa } from "@/lib/legal/dica-do-relatorio-de-dados";
 import { useT } from "@/hooks/i18n/useT";
 
 interface Props {
@@ -61,7 +62,16 @@ interface Props {
   readonly gravada: {
     readonly app_name: string | null;
     readonly accent_hex: string | null;
+    /** A cor do TEMA ESCURO (#2482) — o par; `null` = só a cor acima pinta. */
+    readonly accent_dark_hex: string | null;
     readonly logo_path: string | null;
+    /**
+     * O remetente do e-mail de AUTOMAÇÃO (#3287, fatia 1) — nome de exibição e
+     * "responder para". `null` = a organização não configurou, e o e-mail sai
+     * com o remetente da plataforma.
+     */
+    readonly email_from_name: string | null;
+    readonly email_reply_to: string | null;
   };
   /** A linha da marca da INSTALAÇÃO — a camada logo abaixo desta. */
   readonly instalacao: LinhaDaInstalacao;
@@ -71,6 +81,15 @@ interface Props {
     readonly APP_LOGO_URL?: string;
     readonly APP_ACCENT_HEX?: string;
   };
+  /**
+   * O vocabulário da EMPRESA no país da organização (#2503): o rótulo do nome
+   * legal e o nome da lei, resolvidos do perfil (`lib/legal/perfil-do-pais`).
+   *
+   * Vem de fora porque é propriedade do PAÍS, não do componente — a mesma
+   * régua do #1946. Sem ele, a dica do relatório mandava a organização
+   * portuguesa conferir um campo com outro nome.
+   */
+  readonly vocabulario: VocabularioDaEmpresa;
 }
 
 /** Mensagem por código de recusa da server action. */
@@ -125,17 +144,31 @@ function LinhaDeOrigem({ campo, valor }: { campo: string; valor: string }) {
   );
 }
 
-export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }: Props) {
+export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente, vocabulario }: Props) {
   const t = useT();
   const router = useRouter();
   const [nome, setNome] = useState(gravada.app_name ?? "");
   const [hex, setHex] = useState(gravada.accent_hex ?? "");
+  const [hexEscuro, setHexEscuro] = useState(gravada.accent_dark_hex ?? "");
+  // O remetente do e-mail de AUTOMAÇÃO (#3287, fatia 1). Fora da pilha de marca
+  // de propósito: ele não pinta tela nenhuma, então não entra no `resolverMarca`
+  // nem na prévia — só no `Salvar`.
+  const [remetenteNome, setRemetenteNome] = useState(gravada.email_from_name ?? "");
+  const [responderPara, setResponderPara] = useState(gravada.email_reply_to ?? "");
   const [erroTecnico, setErroTecnico] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const nomeLimpo = nome.trim();
   const hexLimpo = hex.trim();
   const hexValido = hexLimpo.length === 0 || ehHexValido(hexLimpo);
+  const hexEscuroLimpo = hexEscuro.trim();
+  const hexEscuroValido = hexEscuroLimpo.length === 0 || ehHexValido(hexEscuroLimpo);
+  const remetenteNomeLimpo = remetenteNome.trim();
+  const responderParaLimpo = responderPara.trim();
+  // Mesmo piso do schema (`marcaDaOrganizacaoSchema`) — a tela avisa antes de
+  // salvar em vez de deixar a ação devolver `validation_failed` genérico.
+  const responderParaValido =
+    responderParaLimpo.length === 0 || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(responderParaLimpo);
 
   // As duas camadas de baixo, montadas uma vez. `abaixo` sozinho responde "o que
   // aparece se eu não definir nada"; com a camada da organização na frente,
@@ -155,6 +188,10 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
           camadaDaOrganizacao({
             app_name: nomeLimpo.length > 0 ? nomeLimpo : null,
             accent_hex: hexLimpo.length > 0 ? hexLimpo : null,
+            // O par (#2482): mesma camada, mesma precedência por campo —
+            // organização sem cor do escuro não herda a do revendedor, assim
+            // como não herda o logo dele quando define o próprio.
+            accent_dark_hex: hexEscuroLimpo.length > 0 ? hexEscuroLimpo : null,
             // GRAVADO, não digitado: o logo não é campo deste formulário — ele
             // já está no banco quando esta tela renderiza. Entra na prévia para
             // que o bloco "de onde vem cada coisa" possa responder sobre ele.
@@ -164,7 +201,7 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
         ],
         REGUA_DO_PRODUTO,
       ),
-    [nomeLimpo, hexLimpo, gravada.logo_path, abaixo],
+    [nomeLimpo, hexLimpo, hexEscuroLimpo, gravada.logo_path, abaixo],
   );
 
   // A MESMA serialização, com o MESMO escopo, que o layout de `/app` roda no
@@ -177,6 +214,11 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
   );
 
   const derivada = resolvida.cor?.derivada ?? null;
+  /**
+   * A derivação do TEMA ESCURO (#2482): com a segunda cor, é OUTRA — e a
+   * prévia tem de marcar o tom que o escuro vai usar, não o da primeira.
+   */
+  const derivadaEscura = resolvida.cor?.corEscura?.derivada ?? derivada;
 
   /**
    * Em que degrau da escada cada papel pousou. O clamp não é zelo: com
@@ -184,14 +226,16 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
    * pontas (`stop()`). A tira tem de marcar o degrau que de fato pinta.
    */
   const degraus = useMemo(() => {
-    if (!derivada) return null;
+    // Os DOIS têm de ser não-nulos: `derivadaEscura` é `?? derivada`, então a
+    // guarda de cima estreita a variável errada e o TS não infere o par.
+    if (!derivada || !derivadaEscura) return null;
     const preso = (indice: number) => Math.max(0, Math.min(10, indice));
     return {
       suaCor: derivada.origemDaRampa === "semente" ? K : null,
       claro: preso(REGUA_DO_PRODUTO.claro.indices.accent + derivada.claro.deslocamento),
-      escuro: preso(REGUA_DO_PRODUTO.escuro.indices.accent + derivada.escuro.deslocamento),
+      escuro: preso(REGUA_DO_PRODUTO.escuro.indices.accent + derivadaEscura.escuro.deslocamento),
     };
-  }, [derivada]);
+  }, [derivada, derivadaEscura]);
 
   // A distância é medida a partir da COR DA PESSOA, que é a referência de quem
   // lê. Ver `DistanciaAteSuaCor` em `lib/branding/linguagem.ts`.
@@ -207,7 +251,7 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
   );
 
   const legenda = useMemo<ItemDaLegenda[]>(() => {
-    if (!derivada || !degraus) return [];
+    if (!derivada || !derivadaEscura || !degraus) return [];
     return [
       {
         rotulo: t("Sua cor"),
@@ -216,19 +260,31 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
         nota: degraus.suaCor === null ? t("fora da escala — fica só no logo") : undefined,
       },
       { rotulo: t("Botões no modo claro"), hex: derivada.claro.accent, indice: degraus.claro },
-      { rotulo: t("Botões no modo escuro"), hex: derivada.escuro.accent, indice: degraus.escuro },
+      {
+        rotulo: t("Botões no modo escuro"),
+        // #2482: o escuro deriva da SEGUNDA semente quando ela existe.
+        hex: derivadaEscura.escuro.accent,
+        indice: degraus.escuro,
+      },
     ];
-  }, [derivada, degraus, t]);
+  }, [derivada, derivadaEscura, degraus, t]);
 
   function handleSubmit(evento: React.FormEvent) {
     evento.preventDefault();
     setErroTecnico(null);
 
-    // Os dois campos vazios = "volte ao que vem do sistema". A action traduz esse
+    // Os campos vazios = "volte ao que vem do sistema". A action traduz esse
     // par de `null` em apagar a chave inteira, e não em gravar um envelope vazio.
     const lido = marcaDaOrganizacaoSchema.safeParse({
       app_name: nomeLimpo.length > 0 ? nomeLimpo : null,
       accent_hex: hexLimpo.length > 0 ? hexLimpo : null,
+      accent_dark_hex: hexEscuroLimpo.length > 0 ? hexEscuroLimpo : null,
+      // O remetente da automação (#3287, fatia 1). Vão SEMPRE, mesmo quando a
+      // pessoa só mexeu na cor: o `Save` da marca substitui o objeto `branding`
+      // inteiro (só o `logo_path` é preservado no banco), então omitir um campo
+      // aqui o APAGARIA em silêncio no próximo salvamento de qualquer outro.
+      email_from_name: remetenteNomeLimpo.length > 0 ? remetenteNomeLimpo : null,
+      email_reply_to: responderParaLimpo.length > 0 ? responderParaLimpo : null,
     });
     if (!lido.success) {
       toast.error(t("Confira os campos: algum valor não está no formato esperado."));
@@ -323,6 +379,57 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
           </p>
         </div>
 
+        {/*
+          O PAR da cor (#2482), mesmo desenho do campo de cima e do par de
+          logo: só muda para qual tema a semente vale.
+        */}
+        <div className="space-y-2">
+          <Label htmlFor="org_accent_dark_hex">
+            {t("Cor da sua marca no tema escuro (opcional)")}
+          </Label>
+          <div className="flex items-center gap-3">
+            <label
+              className="relative h-10 w-10 shrink-0 cursor-pointer overflow-hidden rounded-sm border border-border"
+              style={{
+                backgroundColor: ehHexValido(hexEscuroLimpo)
+                  ? normalizarHex(hexEscuroLimpo)
+                  : COR_NEUTRA_DO_SELETOR,
+              }}
+            >
+              <span className="sr-only">{t("Escolher a cor visualmente")}</span>
+              <input
+                type="color"
+                value={
+                  ehHexValido(hexEscuroLimpo)
+                    ? normalizarHex(hexEscuroLimpo)
+                    : COR_NEUTRA_DO_SELETOR
+                }
+                onChange={(e) => setHexEscuro(e.target.value)}
+                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+              />
+            </label>
+            <Input
+              id="org_accent_dark_hex"
+              value={hexEscuro}
+              onChange={(e) => setHexEscuro(e.target.value)}
+              placeholder="#7a5cd6"
+              spellCheck={false}
+              autoComplete="off"
+              aria-invalid={!hexEscuroValido}
+              aria-describedby="ajuda-da-cor-escura-da-organizacao"
+              className="w-36 font-mono"
+            />
+            {hexEscuroLimpo.length > 0 && !hexEscuroValido ? (
+              <span className="text-sm text-error-fg">
+                {t("Use um código de cor como #7a5cd6.")}
+              </span>
+            ) : null}
+          </div>
+          <p id="ajuda-da-cor-escura-da-organizacao" className="text-xs text-text-muted">
+            {t("Deixe em branco para os dois modos usarem a cor acima.")}
+          </p>
+        </div>
+
         {derivada ? (
           <div className="space-y-2">
             <p className="text-sm text-text-muted">
@@ -364,6 +471,63 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
           origemDoHerdado="de quem instalou o sistema"
           nomeEmVigor={resolvida.name}
         />
+      </Card>
+
+      {/*
+        O remetente do e-mail de AUTOMAÇÃO (#3287, fatia 1). Fica na MESMA tela
+        da marca porque, para quem administra a empresa, é a mesma pergunta
+        ("como a minha empresa aparece"); o que o separa é o ALCANCE — estes dois
+        campos só tocam o e-mail que as regras mandam ao cliente final, e o
+        endereço de ENVIO (o domínio) continua sendo o do sistema. O SMTP próprio
+        da organização é a fatia 2 e ainda não aparece aqui.
+      */}
+      <Card className="space-y-4 p-6">
+        <h2 className="text-base font-semibold tracking-tight text-text">
+          {t("Como seus e-mails saem")}
+        </h2>
+        <p className="text-sm text-text-muted">
+          {t(
+            "Vale para os e-mails que as automações enviam ao seu cliente. O endereço de envio continua sendo o do sistema — o que muda é o nome que aparece e para onde vai a resposta.",
+          )}
+        </p>
+
+        <div className="space-y-2">
+          <Label htmlFor="org_email_from_name">{t("Nome de exibição")}</Label>
+          <Input
+            id="org_email_from_name"
+            value={remetenteNome}
+            onChange={(e) => setRemetenteNome(e.target.value)}
+            // O placeholder é o nome EM VIGOR sem esta camada, igual ao campo de
+            // cima: é assim que o campo vazio responde "e se eu não preencher?".
+            placeholder={semAOrganizacao.name}
+            maxLength={120}
+            autoComplete="off"
+          />
+          <p className="text-xs text-text-muted">
+            {t("É o que o cliente lê como remetente. Deixe em branco para usar o do sistema.")}
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="org_email_reply_to">{t("Responder para")}</Label>
+          <Input
+            id="org_email_reply_to"
+            value={responderPara}
+            onChange={(e) => setResponderPara(e.target.value)}
+            placeholder="contato@suaempresa.com"
+            spellCheck={false}
+            autoComplete="off"
+            aria-invalid={!responderParaValido}
+          />
+          {!responderParaValido ? (
+            <span className="text-sm text-error-fg">
+              {t("Use um endereço de e-mail como contato@suaempresa.com")}
+            </span>
+          ) : null}
+          <p className="text-xs text-text-muted">
+            {t("Para onde vai a resposta do cliente. Deixe em branco para usar o endereço do sistema.")}
+          </p>
+        </div>
       </Card>
 
       {/*
@@ -448,8 +612,17 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
           </li>
           <li>
             {t(
-              'O relatório de LGPD entregue ao cliente traz a RAZÃO SOCIAL da sua empresa, e não o nome aqui de cima — é ela que responde legalmente pelos dados. Confira o campo "Razão social" em Configurações → Organização.',
+              "O envio continua saindo pelo servidor de e-mail do sistema: o endereço do remetente (o domínio) não muda, e um servidor de e-mail próprio da sua empresa ainda não é configurável por aqui.",
             )}
+          </li>
+          <li>
+            {/*
+              O campo e a lei são do PAÍS da organização, não do idioma da tela
+              (#2503): em Portugal a dica tem de dizer "Denominação social" e
+              RGPD — o mesmo vocabulário que Configurações → Organização mostra
+              desde o #2502. Ver `dicaDoRelatorio`.
+            */}
+            {dicaDoRelatorio(t, vocabulario)}
           </li>
           <li>
             {t(
@@ -474,7 +647,7 @@ export function FormularioDaMarcaDaOrganizacao({ gravada, instalacao, ambiente }
         {erroTecnico ? (
           <span className="font-mono text-xs text-text-muted">{erroTecnico}</span>
         ) : null}
-        <Button type="submit" disabled={isPending || !hexValido}>
+        <Button type="submit" disabled={isPending || !hexValido || !hexEscuroValido || !responderParaValido}>
           {isPending ? t("Salvando…") : t("Salvar")}
         </Button>
       </div>

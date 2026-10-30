@@ -8,8 +8,10 @@
  * Postgres function (defense in depth).
  */
 import { z } from "zod";
+import { ehToolIdRemoto } from "@/lib/mcp/servidor-externo/ids";
 import { VALID_TOOL_IDS } from "@/lib/mcp/tools/catalog";
 import { TETO_TOOLS_POR_AGENTE } from "@/lib/mcp/tools/selecao-por-pacote";
+import { TETO_DO_PUBLICO } from "@/lib/agent-engine/agent/publico-do-gatilho";
 import { IDS_DE_PROVEDOR } from "@/lib/ai/pontos/provedores";
 
 /**
@@ -45,8 +47,28 @@ const triggerConfigSchema = z
           .nullable()
           .optional()
           .default(null),
+        // PÚBLICO DO AGENTE (#3722). Quatro listas opcionais, no jsonb da
+        // versão — sem coluna nova, sem migration. Sem estas linhas o schema
+        // `.strict()` RECUSA o payload da tela (o campo chegaria como chave
+        // desconhecida) e o operador não conseguiria salvar o público.
+        // `include_` = só atende quem cumpre; `exclude_` = não atende quem
+        // cumpre, e a exclusão vence. A régua de decisão mora em
+        // `lib/agent-engine/agent/publico-do-gatilho.ts`.
+        include_tags: z.array(z.string().trim().min(1).max(60)).max(TETO_DO_PUBLICO).default([]),
+        exclude_tags: z.array(z.string().trim().min(1).max(60)).max(TETO_DO_PUBLICO).default([]),
+        include_pipeline_ids: z.array(UUID).max(TETO_DO_PUBLICO).default([]),
+        exclude_pipeline_ids: z.array(UUID).max(TETO_DO_PUBLICO).default([]),
       })
-      .default({ ignore_groups: true, ignore_self: true, keyword_regex: null, business_hours: null }),
+      .default({
+        ignore_groups: true,
+        ignore_self: true,
+        keyword_regex: null,
+        business_hours: null,
+        include_tags: [],
+        exclude_tags: [],
+        include_pipeline_ids: [],
+        exclude_pipeline_ids: [],
+      }),
     concurrency: z.enum(["one_per_conversation", "one_per_contact"]).default("one_per_conversation"),
   })
   .strict();
@@ -131,13 +153,19 @@ const versionShapeSchema = z
      */
     credential_id: UUID.nullable(),
     tool_ids: z
-      .array(z.string().min(1).max(80))
+      .array(z.string().min(1).max(120))
       // O mesmo teto que a tela mostra ("13 de 20") é o que o servidor recusa —
       // ver `lib/mcp/tools/selecao-por-pacote.ts` para o porquê do número.
       .max(TETO_TOOLS_POR_AGENTE)
       .default([])
+      // Catálogo compilado OU ferramenta remota escolhida pelo agente (item 6,
+      // `mcp_externo:<leitura|escrita>:<nome>`): recusar a remota aqui faria a
+      // tela salvar e a publicação devolver `tool_id_invalid`.
       .refine(
-        (ids) => ids.every((id) => (VALID_TOOL_IDS as readonly string[]).includes(id)),
+        (ids) =>
+          ids.every((id) =>
+            ehToolIdRemoto(id) || (VALID_TOOL_IDS as readonly string[]).includes(id),
+          ),
         { message: "tool_id_invalid" },
       ),
     trigger_config: triggerConfigSchema.optional(),
@@ -150,11 +178,12 @@ const versionShapeSchema = z
      * em `channel_sessions`, o editor não deixava salvar uma linha do que ele
      * acabou de escrever — a tela exigia escolher de uma lista vazia.
      *
-     * ⚠️ NULO RASCUNHA, NÃO ATENDE. Publicar sem número continua recusado, e em
-     * três camadas independentes: `bloqueioDePublicacao` desabilita o botão,
-     * `fn_publish_ai_agent_version` levanta `channel_session_not_found` (o
-     * `select` por `channel_session_id` nulo não acha linha), e o runtime resolve
-     * o agente por `published_version_id` — sem publicação, ninguém o executa.
+     * ⚠️ NULO RASCUNHA, NÃO ATENDE DIRETAMENTE. Um agente comum precisa escolher
+     * número antes de publicar. Um especialista sem número próprio SÓ pode ser
+     * publicado se for membro comprovado de roteador da mesma organização, cujo
+     * canal está WORKING (validado novamente na RPC). Nesse caso, o runtime
+     * alcança a versão exclusivamente pelo ID selecionado pelo roteador; canal
+     * sem roteador não encontra a versão com channel_session_id NULL.
      */
     channel_session_id: UUID.nullable(),
     max_steps: z.number().int().min(1).max(25).default(10),
@@ -167,6 +196,11 @@ const versionShapeSchema = z
       .max(20)
       .default(["falar com humano", "atendente", "pessoa real"]),
     handoff_tool_enabled: z.boolean().default(true),
+    // Passar para uma pessoa por ASSUNTO JURÍDICO — irmão da linha acima, com
+    // o MESMO molde: booleano com default LIGADO (#2097, #2156). O default é
+    // `true` porque quem não mexer tem de ficar com o resultado de hoje; o
+    // efeito da chave (trocar a descrição da ferramenta) mora no turno.
+    handoff_legal_enabled: z.boolean().default(true),
     proposal_ai_draft_enabled: z.boolean().default(true),
     cases_enabled: z.boolean().default(false),
     // Onda 4 — quebra a resposta em bolhas curtas (splitIntoBubbles) espaçadas
@@ -203,11 +237,17 @@ const versionShapeSchema = z
     // uma régua que já não existe. O porquê do 25 está em
     // `lib/mcp/tools/selecao-por-pacote.ts`, junto da constante.
     operator_tool_ids: z
-      .array(z.string().min(1).max(80))
+      .array(z.string().min(1).max(120))
       .max(TETO_TOOLS_POR_AGENTE)
       .default([])
+      // Catálogo compilado OU ferramenta remota escolhida pelo agente (item 6,
+      // `mcp_externo:<leitura|escrita>:<nome>`): recusar a remota aqui faria a
+      // tela salvar e a publicação devolver `tool_id_invalid`.
       .refine(
-        (ids) => ids.every((id) => (VALID_TOOL_IDS as readonly string[]).includes(id)),
+        (ids) =>
+          ids.every((id) =>
+            ehToolIdRemoto(id) || (VALID_TOOL_IDS as readonly string[]).includes(id),
+          ),
         { message: "tool_id_invalid" },
       ),
     /**
@@ -248,6 +288,7 @@ export const versionPatchSchema = versionShapeSchema
     history_token_window: versionShapeSchema.shape.history_token_window.removeDefault(),
     handoff_keywords: versionShapeSchema.shape.handoff_keywords.removeDefault(),
     handoff_tool_enabled: versionShapeSchema.shape.handoff_tool_enabled.removeDefault(),
+    handoff_legal_enabled: versionShapeSchema.shape.handoff_legal_enabled.removeDefault(),
     proposal_ai_draft_enabled: versionShapeSchema.shape.proposal_ai_draft_enabled.removeDefault(),
     cases_enabled: versionShapeSchema.shape.cases_enabled.removeDefault(),
     split_messages: versionShapeSchema.shape.split_messages.removeDefault(),

@@ -26,7 +26,7 @@ import type { NextRequest } from "next/server";
 
 import { ok, fail } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
-import { situacaoDoRetorno } from "@/lib/followup/retorno";
+import { statusDaPromessaNaFila } from "@/lib/followup/retorno";
 import { createClient } from "@/lib/supabase/server";
 import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -177,7 +177,23 @@ export async function GET(req: NextRequest): Promise<Response> {
       .or(`name.ilike.%${safeQ}%,display_name.ilike.%${safeQ}%,phone_number.ilike.%${safeQ}%`)
       .limit(500); // ponytail: fila é escala MVP; sobe se virar hot path
     if (cErr) return fail("internal_error", cErr.message, 500, { requestId });
-    contactIds = (matches ?? []).map((m) => m.id);
+    // Ficha cujo telefone EXTRA casa o termo também entra: a busca acima olha só o
+    // principal. Mesmo critério de texto, filtrado por organização e pela lápide.
+    const { data: extras, error: eErr } = await supabase
+      .from("contact_phones")
+      .select("contact_id, contacts!inner(id)")
+      .eq("organization_id", activeOrg.orgId)
+      .eq("contacts.organization_id", activeOrg.orgId)
+      .is("contacts.is_merged_into", null)
+      .ilike("phone_number", `%${safeQ}%`)
+      .limit(500);
+    if (eErr) return fail("internal_error", eErr.message, 500, { requestId });
+    contactIds = [
+      ...new Set([
+        ...(matches ?? []).map((m) => m.id),
+        ...((extras ?? []) as { contact_id: string }[]).map((r) => r.contact_id),
+      ]),
+    ];
     if (contactIds.length === 0) {
       return ok<QueueRow[]>([], { requestId, meta: { cursor: null, has_more: false } });
     }
@@ -214,7 +230,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   let promiseQuery = supabase
     .from("cron_jobs")
     .select(
-      "id, contact_id, next_run_at, enabled, cancelled_at, payload, contacts:contact_id(id, name, display_name, phone_number)",
+      "id, contact_id, next_run_at, enabled, cancelled_at, last_error, payload, contacts:contact_id(id, name, display_name, phone_number)",
     )
     .eq("organization_id", activeOrg.orgId)
     .eq("kind", "at")
@@ -258,11 +274,7 @@ export async function GET(req: NextRequest): Promise<Response> {
       // e a fila chamava as duas de "concluída". Com o cancelamento pela tela
       // (0102), isso viraria uma mentira frequente: a pessoa clicaria em cancelar
       // e leria "concluída", como se o cliente tivesse recebido a mensagem.
-      status: situacaoDoRetorno({ enabled: j.enabled, cancelled_at: j.cancelled_at }) === "cancelado"
-        ? "cancelada"
-        : j.enabled
-          ? "agendada"
-          : "concluída",
+      status: statusDaPromessaNaFila(j),
       detail: payload.promise ?? null,
     };
   });

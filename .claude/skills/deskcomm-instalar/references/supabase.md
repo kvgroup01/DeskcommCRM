@@ -46,8 +46,18 @@ não conecta de uma VPS IPv4 — o instalador reconhece e recusa. O pooler tem h
 - Projeto grátis parado por muito tempo pode ser **pausado** pela Supabase; o CRM em uso não para.
 - Cota de saída de rede: o worker do CRM é econômico por padrão; um pico vem de mídia, não de
   consultas.
+- Cota de **leitura e escrita em disco** (Disk IO): a máquina do plano grátis é a menor, e uma
+  importação grande (histórico de WhatsApp, milhares de contatos) pode esgotar a cota. O painel
+  avisa "Your project is about to deplete its Disk IO Budget"; esgotada, o banco fica lento a ponto
+  de o worker registrar `ECHECKOUTTIMEOUT` e `Query read timeout`, e o CRM para de responder. A cota
+  se recarrega com o uso baixo — parar worker e scheduler acelera. Uso real pede máquina maior
+  (plano pago) ou o single-server (`supabase-local.md`).
 
 ## Supabase próprio (instalado pela pessoa, com Docker)
+
+O kit já instala um Supabase no mesmo servidor do CRM, sem a pessoa montar nada: é o modo
+single-server, em `supabase-local.md`. O que segue vale para um Supabase que a pessoa instalou por
+conta própria, fora do kit.
 
 Funciona: o CRM só precisa da URL da API, das duas chaves e de uma connection string que aceite
 conexão da VPS. Aponte `SUPABASE_DB_URL` para o pooler ou para o Postgres da sua pilha; o instalador
@@ -57,6 +67,13 @@ GoTrue da sua pilha (SMTP configurado lá); `marca-emails.sh` usa a Management A
 
 ## Trocar de projeto ou restaurar
 
-Restaurar um backup em outro projeto: crie o projeto, rode o instalador de novo com as credenciais
-novas (ele aplica o schema), depois `bash hostgator-setup-kit/restore.sh backups/db-<data>.sql.gz`.
+O `restore.sh` só restaura num banco **vazio**: num banco que já tem as tabelas do sistema ele para
+antes, sem alterar nada (#2120). Por isso ele **não** volta um backup por cima da instalação em uso,
+e a ordem **não** é instalar e depois restaurar — o instalador aplica o schema, e aí o restore recusa.
+
+Restaurar um backup em outro projeto: crie o projeto Supabase novo, **não** rode o instalador nele,
+troque no `.env` a conexão e as chaves do Supabase pelas do projeto novo, rode
+`bash hostgator-setup-kit/restore.sh backups/db-<data>.sql.gz` e reinicie o app. O restore num
+Supabase recém-criado foi medido (`rc=0`, 110 tabelas); a troca do `.env` não foi. Na dúvida, ou
+num Supabase que roda no próprio servidor (single-server), peça ajuda antes.
 O WhatsApp é pareado de novo por QR se o volume do WAHA não foi restaurado.

@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
 
 import { requireAuth, resolveActiveOrg } from "@/lib/auth/server";
 import { ROLE_RANK } from "@/lib/auth/types";
+import { moduloLigado } from "@/lib/instalacao/modulos";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { PipelinesClient, type EtapaDoFunil, type PipelineRow } from "./_client";
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -34,7 +36,7 @@ export default async function PipelinesSettingsPage() {
   const supabase = await createClient();
   const { data } = await supabase
     .from("crm_pipelines")
-    .select("id, name, slug, vocabulary, settings")
+    .select("id, name, slug, vocabulary, settings, is_default, is_client_pipeline")
     .eq("organization_id", activeOrg.orgId)
     .eq("is_archived", false)
     .order("position");
@@ -45,9 +47,13 @@ export default async function PipelinesSettingsPage() {
   // sem elas a tela não tem o que oferecer como "exigir ao entrar aqui". A
   // leitura é a mesma da página (mesmo cliente, mesma organização) e vem PRONTA
   // do servidor: o editor não espera rede nenhuma para renderizar.
+  //
+  // `is_won`/`is_lost` entram POR CAUSA DA ENTRADA DO INBOX (#3011): card novo
+  // não nasce em "Ganho", então a tela precisa saber quais etapas são de
+  // FECHAMENTO para não oferecê-las como etapa de entrada.
   const { data: etapas } = await supabase
     .from("crm_stages")
-    .select("id, pipeline_id, name, is_archived")
+    .select("id, pipeline_id, name, is_archived, is_won, is_lost")
     .eq("organization_id", activeOrg.orgId)
     .order("position", { ascending: true });
   const etapasPorFunil: Record<string, EtapaDoFunil[]> = {};
@@ -55,6 +61,8 @@ export default async function PipelinesSettingsPage() {
     (etapasPorFunil[e.pipeline_id] ??= []).push(e);
   }
   const idioma = user.idioma;
+  // #1907: sem o módulo `financeiro` não há comanda, e o interruptor do ganho some.
+  const comandaDisponivel = podeEditarConfig && (await moduloLigado(createAdminClient(), "financeiro"));
 
   return (
     <div className="flex h-full flex-col gap-6 p-6">
@@ -74,6 +82,7 @@ export default async function PipelinesSettingsPage() {
         pipelines={pipelines}
         etapas={etapasPorFunil}
         podeEditarConfig={podeEditarConfig}
+        comandaDisponivel={comandaDisponivel}
       />
     </div>
   );

@@ -123,12 +123,70 @@ export interface ClaimOptions {
   batchSize?: number;
 }
 
+/**
+ * O mesmo canal que o handler usa: payload direto ou conversa do atendimento,
+ * sempre da organização e do contato do job. Comparar o id como texto mantém
+ * payload malformado fora do canal, sem derrubar a rodada com um cast de UUID.
+ * Compartilhado com o watchdog para o claim não voltar a usar outra régua.
+ */
+export const CANAL_DO_JOB_SQL = `coalesce(
+         j.payload->>'channel_session_id',
+         (select c.channel_session_id::text from conversations c
+           where c.organization_id = j.organization_id
+             and c.contact_id = j.contact_id
+             and c.id::text = j.payload #>> '{service_boundary,conversation_id}'))`;
+
+/**
+ * O watchdog retém em lotes; o claim precisa respeitar a trava também entre
+ * dois ticks. Go-live segura só o retorno que o negócio inicia. Canal fora do
+ * ar e os demais holds de saúde seguram tanto retorno quanto resposta.
+ * O claim retém o job, além de recusá-lo: a liberação precisa encontrar as
+ * marcas mesmo quando o humano resolve o aviso antes do próximo watchdog.
+ */
+const JOB_SEM_HOLD_DE_CANAL_SQL = `(j.kind not in ('inbound_turn', 'followup_turn')
+      or not exists (
+        select 1 from channel_sessions s
+        left join channel_session_health h
+          on h.organization_id = s.organization_id and h.channel_session_id = s.id
+        where s.organization_id = j.organization_id
+          and s.id::text = ${CANAL_DO_JOB_SQL}
+          and (s.status <> 'WORKING'
+               or (coalesce(h.health_hold_active, false)
+                   and (h.health_hold_reason is distinct from 'go_live' or j.kind = 'followup_turn')))
+      ))`;
+
 const CLAIM_SQL = `
-  with dedup as (
+  -- Reter também respeita o contrato não-bloqueante do claim: uma linha
+  -- travada por outra conexão não segura o job saudável de outra lane. Usa
+  -- o mesmo tamanho de lote já calculado, sem varrer/escrever toda a fila.
+  with para_reter as materialized (
+    select j.id, ${CANAL_DO_JOB_SQL} as canal
+    from job_queue j
+    where j.status = 'pending'
+      and not (j.payload ? 'held_run_after')
+      and not ${JOB_SEM_HOLD_DE_CANAL_SQL}
+    order by j.priority, j.run_after, j.id
+    limit $1
+    for update of j skip locked
+  ),
+  retidos as (
+    update job_queue j
+    set payload = jsonb_set(j.payload, '{held_run_after}', to_jsonb(j.run_after))
+                  || jsonb_build_object('held_channel_session_id', r.canal),
+        run_after = 'infinity'
+    from para_reter r
+    where j.id = r.id
+    returning j.id
+  ),
+  dedup as (
     -- etapa (a): no máximo 1 job por lane por lote; lane sem lead = o próprio id
     select distinct on (coalesce(j.contact_id, j.id)) j.id
     from job_queue j
     where j.status = 'pending' and j.run_after <= now()
+      -- CTEs compartilham a foto anterior ao UPDATE. O RETURNING torna os
+      -- conjuntos disjuntos sem depender de enxergar run_after já alterado.
+      and not exists (select 1 from retidos where retidos.id = j.id)
+      and ${JOB_SEM_HOLD_DE_CANAL_SQL}
       and (j.contact_id is null
            or not exists (select 1 from job_queue r
                           where r.contact_id = j.contact_id and r.status = 'running'))
@@ -159,6 +217,8 @@ const CLAIM_SQL = `
 /**
  * Quantos MILISSEGUNDOS faltam até o próximo job ficar claimável — `null` quando
  * não há nenhum `pending`. É o relógio que o loop consulta ANTES de abrir o claim.
+ * Inclui job sob hold ainda sem marca: acorda UMA vez para o claim retê-lo.
+ * Depois, `run_after = 'infinity'` faz o relógio dormir, sem girar em falso.
  *
  * Um `select` só, sem `connect`, sem `begin` e sem advisory lock: o claim custa 5
  * statements e 638 B de egress por rodada (medido no protocolo, fila vazia), e
@@ -215,6 +275,11 @@ export async function faltaParaOProximoJob(pool: Pool): Promise<number | null> {
 
 export async function claimJobs(pool: Pool, opts: ClaimOptions): Promise<JobRow[]> {
   const client = await pool.connect();
+  // #2506: consulta que estoura o query_timeout rejeita a promessa mas NÃO destrói
+  // o socket (pg 8.23, fora do modo pipeline). Liberado com release() sem erro, este
+  // cliente volta ao pool com a transação antiga aberta e é reemprestado nela — o
+  // próximo dono roda dentro da transação do anterior. O finally lê daqui.
+  let erroNaTransacao: Error | undefined;
   try {
     await client.query('begin');
     await client.query('select pg_advisory_xact_lock($1)', [CLAIM_LOCK_KEY]);
@@ -233,13 +298,14 @@ export async function claimJobs(pool: Pool, opts: ClaimOptions): Promise<JobRow[
     await client.query('commit');
     return rows;
   } catch (err) {
+    erroNaTransacao = err instanceof Error ? err : new Error(String(err));
     await rollback(client, err);
     if (isUniqueViolation(err)) {
       return []; // cinto do índice parcial: corrida residual perde só a rodada
     }
     throw err;
   } finally {
-    client.release();
+    client.release(erroNaTransacao);
   }
 }
 
@@ -257,6 +323,9 @@ export async function completeJob<T = void>(
   acquiredAt?: string,
 ): Promise<T> {
   const client = await pool.connect();
+  // #2506 — mesma marcação do claimJobs: o finally só libera COM erro quem falhou
+  // dentro da transação (senão o pg-pool o reempresta com o BEGIN antigo de pé).
+  let erroNaTransacao: Error | undefined;
   try {
     await client.query('begin');
     const result = (inSameCommit ? await inSameCommit(client) : undefined) as T;
@@ -273,10 +342,11 @@ export async function completeJob<T = void>(
     await client.query('commit');
     return result;
   } catch (err) {
+    erroNaTransacao = err instanceof Error ? err : new Error(String(err));
     await rollback(client, err);
     throw err;
   } finally {
-    client.release();
+    client.release(erroNaTransacao);
   }
 }
 

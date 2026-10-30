@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 
 import { audit } from "@/lib/audit";
 import { cookieSecure } from "@/lib/supabase/cookie-secure";
+import { invalidarUsuario } from "@/lib/auth/cache-curto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { InvitePayload } from "@/lib/auth/invite-token";
 
@@ -43,7 +44,7 @@ import type { InvitePayload } from "@/lib/auth/invite-token";
 
 export type ResultadoDoConvite =
   | { ok: true; membershipId: string; mudou: boolean }
-  | { ok: false; motivo: "invalid_or_expired" | "internal_error" };
+  | { ok: false; motivo: "invalid_or_expired" | "internal_error" | "limite_do_plano" };
 
 export async function aplicarConvite(params: {
   userId: string;
@@ -65,6 +66,11 @@ export async function aplicarConvite(params: {
 
   // Org, papel e convidador vêm EXCLUSIVAMENTE do token assinado; o usuário,
   // de quem chamou. Nada aqui vem de body de requisição.
+  // #3696: o snapshot desta identidade pode ter sido gravado na tela do
+  // convite, quando ela ainda não tinha vínculo. Derrubar ANTES do RPC impede
+  // que uma requisição concorrente o regrave durante a escrita; o
+  // `invalidarUsuario` do fim cobre o commit.
+  invalidarUsuario(userId);
   const { data: resultado, error } = await admin.rpc("fn_accept_team_invite", {
     p_interface_settings: payload.interface_settings ?? { preset: "completa" },
     p_user: userId,
@@ -80,7 +86,15 @@ export async function aplicarConvite(params: {
       ok: false,
       // 42501 é a recusa da própria função (convite revogado ou posterior à
       // revogação) — não é falha de infraestrutura e não merece 500.
-      motivo: error.code === "42501" ? "invalid_or_expired" : "internal_error",
+      // PT402 é o gatilho de assentos do plano (spec cobrança §5, decisão
+      // D-10): a empresa está no teto de pessoas. Quem aceita precisa ler isso,
+      // e não "o convite venceu" — pedir outro link falharia igual.
+      motivo:
+        error.code === "42501"
+          ? "invalid_or_expired"
+          : error.code === "PT402"
+            ? "limite_do_plano"
+            : "internal_error",
     };
   }
 
@@ -116,6 +130,11 @@ export async function aplicarConvite(params: {
     path: "/",
     maxAge: 60 * 60 * 24 * 30,
   });
+
+  // #3696: quem aceitou convite entra AGORA — o cache curto desta identidade
+  // pode ter sido preenchido momentos antes (a tela de convite já carrega
+  // `loadAuthUser` com o usuário ainda sem vínculo).
+  invalidarUsuario(userId);
 
   return { ok: true, membershipId: resultado.id as string, mudou: Boolean(resultado.changed) };
 }

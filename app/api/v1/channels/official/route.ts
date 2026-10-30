@@ -42,6 +42,7 @@ import { metadataInicialDoCanal } from "@/lib/ai/elegibilidade/pre-go-live";
 import { encryptWebhookSecret } from "@/lib/webhooks/secrets";
 import { basePublicaDoWebhookMeta } from "@/lib/webhooks/url-publica";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { traduzirLimiteDoPlano } from "@/lib/cobranca/limites";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -68,11 +69,13 @@ interface DesfechoGravado {
  */
 async function lerDesfechoDoWebhook(
   admin: ReturnType<typeof createAdminClient>,
+  orgId: string,
   channelSessionId: string,
 ): Promise<DesfechoGravado | null> {
   const { data, error } = await admin
     .from("channel_sessions")
     .select(COLUNAS_DO_DESFECHO_DO_WEBHOOK)
+    .eq("organization_id", orgId)
     .eq("id", channelSessionId)
     .maybeSingle();
   if (error) return null;
@@ -140,7 +143,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   );
 
   const base = basePublicaDoWebhookMeta(req);
-  const desfecho = data?.id ? await lerDesfechoDoWebhook(admin, data.id) : null;
+  const desfecho = data?.id ? await lerDesfechoDoWebhook(admin, orgId, data.id) : null;
   return ok({
     connected: Boolean(data),
     channel_session_id: data?.id ?? null,
@@ -254,13 +257,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       .eq("provider", CHANNEL_PROVIDER_META)
       .maybeSingle();
   const { data: existenteRaw } = await queryTolerantToMissingArchived(
-    () => buscarExistente(`id, ${ARCHIVED_AT}, webhook_path_token`),
-    () => buscarExistente("id, webhook_path_token"),
+    () => buscarExistente(`id, ${ARCHIVED_AT}, webhook_path_token, display_name`),
+    () => buscarExistente("id, webhook_path_token, display_name"),
   );
   const existente = existenteRaw as {
     id: string;
     archived_at?: string | null;
     webhook_path_token?: string | null;
+    display_name?: string | null;
   } | null;
 
   const linha = {
@@ -270,7 +274,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     meta_waba_id: waba_id,
     meta_token_encrypted: cifrado,
     phone_number: validacao.displayPhoneNumber ? `+${validacao.displayPhoneNumber.replace(/\D/g, "")}` : null,
-    display_name: validacao.verifiedName ?? "Canal oficial",
+    // O nome do provedor só batiza a conexão; depois dela o nome é do operador
+    // (Renomear), e salvar a credencial de novo não o apaga. Mesma regra do
+    // `coalesce(display_name, ...)` do pareamento por QR.
+    display_name: existente?.display_name || (validacao.verifiedName ?? "Canal oficial"),
     status: "WORKING",
   };
 
@@ -327,6 +334,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   if (error) {
+    // Ressuscitar ou criar o canal acima do plano: o gatilho de canais recusa (spec cobrança §5).
+    const limite = traduzirLimiteDoPlano(error, authz.user.idioma);
+    if (limite) return fail(limite.code, limite.message, 409, { requestId, details: limite.details });
     return fail("internal_error", error.message ?? "channel_session_write_failed", 500, {
       requestId,
     });

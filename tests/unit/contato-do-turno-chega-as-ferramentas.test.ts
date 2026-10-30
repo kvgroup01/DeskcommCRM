@@ -17,6 +17,15 @@ const pickToolsFromMcp = vi.fn((_input: Record<string, unknown>): Record<string,
   throw new Error("parou_na_montagem");
 });
 
+/**
+ * Grava os argumentos da carga do servidor MCP externo (#2147, item 8): a
+ * ESCOLHA (b) é que o CONTATO chegue aqui — turno com conversa, sem a opção
+ * `mcp_externo_no_atendimento` do agente, não carrega servidor remoto nenhum,
+ * e repassar o contato (e a opção, só quando ligada) é a única forma de isso
+ * valer para os DOIS montadores (Conversador e Operador).
+ */
+const carregarServidorMcpExternoDoTurno = vi.fn(async (..._argumentos: unknown[]) => null);
+
 vi.mock("@/lib/ai/runtime/tools", () => ({ pickToolsFromMcp }));
 vi.mock("@/lib/ai/runtime/mcp_token", () => ({
   mintEphemeralToken: vi.fn(async () => ({ id: "tok-1" })),
@@ -33,6 +42,14 @@ vi.mock("@/lib/ai/credentials", () => ({
   CredentialUnavailableError: class extends Error {},
   loadCredential: vi.fn(async () => ({ apiKey: "chave", baseUrl: null })),
 }));
+/**
+ * O montador do motor carrega o servidor MCP externo LÁ DENTRO (o próprio dele
+ * é quem lê `organizations.settings`), e este teste passa `{}` como supabase de
+ * propósito: sem o mock, `carregarServidorMcpExternoDoTurno` estoura
+ * `supabase.from is not a function` antes de qualquer asserção sobre o contato.
+ * Devolver `null` mantém o recado da função: sem registro, não há chave nova.
+ */
+vi.mock("@/lib/mcp/servidor-externo/carregar", () => ({ carregarServidorMcpExternoDoTurno }));
 const finalizeRun = vi.fn(async (_args: Record<string, unknown>) => {});
 vi.mock("@/lib/ai/runtime/finalize", () => ({ finalizeRun, sendFinalResponse: vi.fn() }));
 
@@ -63,17 +80,39 @@ function entregue(): Record<string, unknown> {
 
 beforeEach(() => {
   pickToolsFromMcp.mockClear();
+  carregarServidorMcpExternoDoTurno.mockClear();
   finalizeRun.mockClear();
 });
 
+/** O 4º argumento de `carregarServidorMcpExternoDoTurno` — é ele que carrega o contato. */
+function opcoesDaCarga() {
+  expect(carregarServidorMcpExternoDoTurno, "o servidor externo nem foi consultado").toHaveBeenCalled();
+  return carregarServidorMcpExternoDoTurno.mock.calls.at(-1)![3] as Record<string, unknown> | undefined;
+}
+
+/**
+ * O 3º argumento: o `tool_ids` do agente. É por ele que a carga decide se abre
+ * rede (item 7) — um montador que deixasse de repassá-lo descobriria o servidor
+ * de todo agente, com ou sem escolha remota.
+ */
+function toolIdsDaCarga() {
+  expect(carregarServidorMcpExternoDoTurno, "o servidor externo nem foi consultado").toHaveBeenCalled();
+  return carregarServidorMcpExternoDoTurno.mock.calls.at(-1)![2];
+}
+
 describe("motor: buildMcpTurnTools repassa o contato do turno", () => {
-  async function montar(contactId: string | null) {
+  async function montar(contactId: string | null, mcpExternoNoAtendimento?: boolean) {
     pickToolsFromMcp.mockImplementationOnce(() => ({}));
     const { buildMcpTurnTools } = await import("@/lib/agent-engine/edge/crm/mcp-tools");
     await buildMcpTurnTools(
       { supabase: {} as never },
-      { organizationId: "org-1", jobId: "job-1", contactId },
-      { agentId: "agente-1", toolIds: ["crm_query_external_data"], pipelineIds: [] } as never,
+      { organizationId: "org-1", jobId: "job-1", contactId, conversationId: "conv-1" },
+      {
+        agentId: "agente-1",
+        toolIds: ["crm_query_external_data"],
+        pipelineIds: [],
+        ...(mcpExternoNoAtendimento !== undefined ? { mcpExternoNoAtendimento } : {}),
+      } as never,
       { warn: vi.fn() } as never,
     );
     return entregue();
@@ -83,8 +122,34 @@ describe("motor: buildMcpTurnTools repassa o contato do turno", () => {
     expect((await montar(CONTATO)).contatoDoTurno).toBe(CONTATO);
   });
 
-  it("ensaio sem cliente: nada é inventado", async () => {
+  // `toEqual`, não `toMatchObject`: um `noAtendimento: true` a mais é a opção
+  // desligada de fábrica ligando sozinha em todo agente (#2147).
+  it.each([undefined, false])(
+    "turno com cliente, opção do agente %s: a carga recebe SÓ o contato e não carrega nada (item 8)",
+    async (opcao) => {
+      await montar(CONTATO, opcao);
+      expect(opcoesDaCarga()).toEqual({ contatoDoTurno: CONTATO });
+    },
+  );
+
+  it("turno com cliente e opção LIGADA: a carga recebe o contato, a opção e a conversa", async () => {
+    await montar(CONTATO, true);
+    expect(opcoesDaCarga()).toEqual({ contatoDoTurno: CONTATO, noAtendimento: true, conversaDoTurno: "conv-1" });
+  });
+
+  it("ensaio sem cliente: nada é inventado, nem o contato na carga externa", async () => {
     expect(await montar(null)).not.toHaveProperty("contatoDoTurno");
+    expect(opcoesDaCarga()).toEqual({});
+  });
+
+  it("ensaio sem cliente com a opção ligada: segue sem nada na carga (turno sem contato inalterado)", async () => {
+    await montar(null, true);
+    expect(opcoesDaCarga()).toEqual({});
+  });
+
+  it("a carga recebe o tool_ids do agente — é ele que decide se abre rede (item 7)", async () => {
+    await montar(null);
+    expect(toolIdsDaCarga()).toEqual(["crm_query_external_data"]);
   });
 });
 
@@ -95,7 +160,11 @@ describe("runtime antigo: runAgent repassa o contato do turno", () => {
     await import("@/lib/ai/runtime/agent");
   }, 120_000);
 
-  async function rodar(run: { contact_id: string | null; conversation_id: string | null }, conversa?: unknown) {
+  async function rodar(
+    run: { contact_id: string | null; conversation_id: string | null },
+    conversa?: unknown,
+    configDoAgente?: unknown,
+  ) {
     linhas = {
       ai_agent_runs: {
         id: "run-1",
@@ -120,7 +189,12 @@ describe("runtime antigo: runAgent repassa o contato do turno", () => {
         handoff_keywords: [],
         handoff_tool_enabled: false,
       },
-      ai_agents: { id: "agente-1", organization_id: "org-1", created_by: null },
+      ai_agents: {
+        id: "agente-1",
+        organization_id: "org-1",
+        created_by: null,
+        ...(configDoAgente !== undefined ? { config: configDoAgente } : {}),
+      },
       ...(conversa !== undefined ? { conversations: conversa } : {}),
     };
     const { runAgent } = await import("@/lib/ai/runtime/agent");
@@ -130,6 +204,23 @@ describe("runtime antigo: runAgent repassa o contato do turno", () => {
   it("o contato da linha do run chega como contatoDoTurno", async () => {
     await rodar({ contact_id: CONTATO, conversation_id: "conv-1" });
     expect(entregue().contatoDoTurno).toBe(CONTATO);
+  });
+
+  // `toEqual`: só o valor booleano `true` em `ai_agents.config` liga a opção.
+  it.each([
+    ["sem config", undefined],
+    ["config null", null],
+    ["opção false", { mcp_externo_no_atendimento: false }],
+    ["opção 'true' em texto", { mcp_externo_no_atendimento: "true" }],
+    ["opção 1", { mcp_externo_no_atendimento: 1 }],
+  ])("turno de conversa sem a opção do agente (%s): a carga recebe SÓ o contato (item 8)", async (_c, config) => {
+    await rodar({ contact_id: CONTATO, conversation_id: "conv-1" }, undefined, config);
+    expect(opcoesDaCarga()).toEqual({ contatoDoTurno: CONTATO });
+  });
+
+  it("turno de conversa com a opção LIGADA: a carga recebe o contato, a opção e a conversa", async () => {
+    await rodar({ contact_id: CONTATO, conversation_id: "conv-1" }, undefined, { mcp_externo_no_atendimento: true });
+    expect(opcoesDaCarga()).toEqual({ contatoDoTurno: CONTATO, noAtendimento: true, conversaDoTurno: "conv-1" });
   });
 
   it("linha sem contato: vale o dono da conversa", async () => {
@@ -147,5 +238,11 @@ describe("runtime antigo: runAgent repassa o contato do turno", () => {
   it("controle: ensaio sem conversa monta sem contatoDoTurno", async () => {
     await rodar({ contact_id: null, conversation_id: null });
     expect(entregue()).not.toHaveProperty("contatoDoTurno");
+    expect(opcoesDaCarga()).toEqual({});
+  });
+
+  it("a carga recebe o tool_ids da versão — é ele que decide se abre rede (item 7)", async () => {
+    await rodar({ contact_id: null, conversation_id: null });
+    expect(toolIdsDaCarga()).toEqual(["crm_query_external_data"]);
   });
 });

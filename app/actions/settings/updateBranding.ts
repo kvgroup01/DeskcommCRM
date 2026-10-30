@@ -6,6 +6,7 @@ import { audit } from "@/lib/audit";
 import { escritaDeAdminOuRecusa } from "@/lib/auth/escritaDeAdminOuRecusa";
 import { invalidarMarcaDaInstalacao } from "@/lib/branding/instalacao";
 import { normalizarHex } from "@/lib/branding/rampa";
+import { ipDoCliente } from "@/lib/http/ip-do-cliente";
 import { platformBrandingSchema, type PlatformBrandingInput } from "@/lib/schemas/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -85,7 +86,7 @@ export async function updateBranding(
 
   const hdrs = await headers();
   const requestId = hdrs.get("x-request-id");
-  const ip = hdrs.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+  const ip = ipDoCliente(hdrs);
   const userAgent = hdrs.get("user-agent") ?? null;
 
   const valores = {
@@ -96,6 +97,11 @@ export async function updateBranding(
     // dois passa pelo banco. Normalizar aqui é o que faz "mudou?" ser uma
     // pergunta com resposta — duas grafias da mesma cor mentiriam.
     accent_hex: parsed.data.accent_hex === null ? null : normalizarHex(parsed.data.accent_hex),
+    // Mesma normalização e MESMO CHECK da irmã (#2482): `#FFF` passa pelo
+    // domínio e não passa pelo banco, e normalizar aqui é o que faz "mudou?"
+    // ser uma pergunta com resposta.
+    accent_dark_hex:
+      parsed.data.accent_dark_hex === null ? null : normalizarHex(parsed.data.accent_dark_hex),
     show_powered_by: parsed.data.show_powered_by,
     // A linha passa a ser HUMANA. É o que impede a semeadura do `.env` de
     // reescrever a escolha no render seguinte — inclusive quando a escolha foi

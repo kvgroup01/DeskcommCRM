@@ -1,5 +1,5 @@
 import { assertProspectingDelivery } from "@/lib/prospecting/guard";
-import { assertAgentOperationSupabase } from "@/lib/ai/agents/operation";
+import { assertAgentOperationSupabase, mesmaOperacao } from "@/lib/ai/agents/operation";
 import {
   assertApprovedReplySupabase,
   recordApprovedReplyReceiptSupabase,
@@ -9,9 +9,14 @@ import {
 import { assertMeetingDeliverySupabase } from "@/lib/agenda/meet-delivery";
 import { AgendaDeferredError } from "@/lib/agenda/protecao-followup";
 import { assertAgendaEffectSupabase, guardAgendaEffect } from "@/lib/agenda/efeito";
-import { StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
+import { mesmaFronteira, StaleServiceBoundaryError } from "@/lib/atendimento/fronteira";
 import { assertServiceBoundarySupabase } from "@/lib/atendimento/origem";
-import { currentExecutionBoundary, guardServiceEffect } from "@/lib/atendimento/fronteira-server";
+import {
+  currentExecutionAgentOperation,
+  currentExecutionBoundary,
+  guardServiceEffect,
+} from "@/lib/atendimento/fronteira-server";
+import { logger } from "@/lib/logger";
 /**
  * Core handlers para messages (list + send).
  *
@@ -49,11 +54,19 @@ import {
 } from "@/lib/messaging/contact-card";
 import type { ListMessagesQuery, SendMessageInput } from "@/lib/schemas";
 import { sendTemplateForSession } from "@/lib/channels/meta/send-template-for-session";
+import {
+  MENSAGEM_DO_NUMERO,
+  quadroDoNumero,
+  vereditoDoNumero,
+} from "@/lib/channels/numero-do-atendente";
 import { emitirFalhaDeEntrega } from "@/lib/messaging/falha-de-entrega";
+import { previaDaMensagem } from "@/lib/messaging/previa-da-mensagem";
 import { aplicarAssinatura, configAssinatura, linhaDeAssinatura } from "@/lib/messaging/assinatura";
+import { nomeDoAgenteDeIA } from "@/lib/messaging/nome-do-agente-de-ia";
 import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { nomesDosAtendentes } from "@/lib/users/nome-do-atendente";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { enderecoDaUltimaRecebida } from "@/lib/channels/endereco-da-ultima-recebida";
 import type { Message } from "@/lib/types/messaging";
 
 type SB = SupabaseClient;
@@ -202,7 +215,7 @@ export function origemDaMensagem(actor: Actor): "user" | "ai" | "automation" | "
 }
 
 const MSG_COLS =
-  "id, organization_id, conversation_id, channel_session_id, contact_id, external_id, type, direction, status, ack, error_code, error_message, body, media_url, media_mime, media_size_bytes, media_storage_path, media_derived_text, media_derived_status, sent_via, sent_by_user_id, sent_on_behalf_of_user_id, sent_at, delivered_at, read_at, metadata, edited_at, revoked_at, reply_to_message_id, created_at";
+  "id, organization_id, conversation_id, channel_session_id, contact_id, external_id, type, direction, status, ack, error_code, error_message, body, media_url, media_mime, media_size_bytes, media_storage_path, media_derived_text, media_derived_status, sent_via, sent_by_user_id, sent_on_behalf_of_user_id, sent_at, delivered_at, read_at, metadata, edited_at, revoked_at, reply_to_message_id, created_at, updated_at";
 
 /**
  * `Actor.type` → o vocabulário de `messages.sent_via` (o CHECK da coluna:
@@ -387,15 +400,14 @@ export async function listMessagesHandler(
 // send
 // ---------------------------------------------------------------------------
 
-function previewFrom(input: {
+export function previewFrom(input: {
   body?: string;
   media_url?: string;
   media_storage_path?: string;
   type?: string;
 }): string {
-  if (input.body) return input.body.slice(0, 280);
-  if (input.media_url || input.media_storage_path) return `[${input.type ?? "media"}]`;
-  return "";
+  if (!input.body && !input.media_url && !input.media_storage_path) return "";
+  return previaDaMensagem(input.body ?? null, input.type ?? "media");
 }
 
 /**
@@ -549,6 +561,59 @@ export async function sendMessageHandler(
     );
   }
 
+  // ─── De quem é o número desta conversa (#3642) ─────────────────────────────
+  //
+  // O envio sai pela sessão da CONVERSA (`c.channel_session_id`), e essa sessão é
+  // o telefone de uma PESSOA. Numa instalação com um número por vendedor, quem
+  // não responde por esse número não fala por ele: depois de uma transferência
+  // (ou de uma troca de carteira), o vendedor novo respondia pelo WhatsApp do
+  // colega — a mensagem saía pelo número do antigo e a resposta do cliente ia
+  // para o celular dele.
+  //
+  // A troca de dono já leva o número junto (`fn_numero_da_transferencia`,
+  // migration 9039). O que sobra para esta guarda é quem TEM número próprio
+  // conectado e está numa conversa no número de outra pessoa (o contato já tinha
+  // conversa no número dele, ou a conversa é anterior a esta regra): aí o envio
+  // recusa ALTO — nunca sai pelo número do colega. Quem não tem número segue
+  // respondendo como hoje (doc 237, escolha 1-B), e organização sem um número
+  // por vendedor não muda nada aqui (é o controle da regra).
+  //
+  // Só ator HUMANO: token de integração e IA não são "a pessoa do número" — o
+  // defeito é de quem digita no Inbox, e restringir a regra a ele deixa os
+  // caminhos automáticos exatamente como estavam.
+  if (ctx.actor.type === "user") {
+    const numero = await quadroDoNumero(supabase, {
+      organizationId: ctx.organization_id,
+      channelSessionId: c.channel_session_id ?? null,
+      provider: c.channel_sessions?.provider ?? null,
+      userId: ctx.actor.id,
+    });
+    if (numero.leitura === "indisponivel") {
+      // Falha FECHADA: um erro transitório não pode reabrir o vazamento em
+      // silêncio, e nada foi enviado.
+      throw new ApiError(
+        503,
+        "numero_do_atendente_indisponivel",
+        undefined,
+        ctx.requestId,
+        traduzir(
+          "Não foi possível conferir o número desta conversa. Nada foi enviado.",
+          ctx.idioma ?? "pt-BR",
+        ),
+      );
+    }
+    const veredito = vereditoDoNumero(numero.quadro);
+    if (!veredito.ok) {
+      throw new ApiError(
+        409,
+        veredito.codigo,
+        { channel_session_id: c.channel_session_id },
+        ctx.requestId,
+        traduzir(MENSAGEM_DO_NUMERO[veredito.codigo], ctx.idioma ?? "pt-BR"),
+      );
+    }
+  }
+
   // ─── A janela de 24h, ANTES de qualquer linha nascer (#1614) ──────────────
   //
   // Em canal com hetero-restrição, texto livre só sai enquanto o cliente
@@ -636,6 +701,28 @@ export async function sendMessageHandler(
   // (`automation`/`system`) ficam de fora, como o relato pede. Humano ganha o
   // nome do atendente com iniciais em maiúsculo; a IA, o nome configurável.
   const origemDoEmissor = origemDaMensagem(ctx.actor);
+  // O id do agente NÃO é o `id` do ator em todo caminho (#3373). O motor do
+  // turno põe o agente no `id` (`lib/agent-engine/edge/crm/send-message.ts`),
+  // mas a Prospecção põe o CANDIDATO no `id` e o agente em `agent_id`
+  // (`lib/prospecting/worker.ts`), e a ação "Mensagem escrita pela IA" dispara
+  // com um ator da regra cujo `id` é a própria regra
+  // (`lib/automation/actions/send-ai-message.ts`). A coluna certa é
+  // `agent_id`; `?? id` é só a ponte do caminho do motor, que ainda não manda
+  // `agent_id`.
+  const idDoAgente =
+    ctx.actor.type === "ai_agent"
+      ? (ctx.actor.agent_id ?? ctx.actor.id)
+      : ctx.actor.type === "webhook_source"
+        ? (ctx.actor.agent_id ?? null)
+        : null;
+  // O nome do agente que enviou é lido UMA vez e serve a dois consumidores: a
+  // assinatura por agente (#3310) e o balão, que mostra "IA · <nome>" a partir
+  // de `metadata.ai_actor_name` gravado na linha, porque ele não faz join
+  // (#3649).
+  const nomeDoAgente =
+    origemDoEmissor === "ai" && idDoAgente !== null
+      ? await nomeDoAgenteDeIA(supabase, ctx.organization_id, idDoAgente)
+      : null;
   let assinatura: string | null = null;
   if (origemDoEmissor === "user" || origemDoEmissor === "ai") {
     const { data: orgAssinatura } = await supabase
@@ -652,7 +739,16 @@ export async function sendMessageHandler(
       if (origemDoEmissor === "user" && ctx.actor.type === "user") {
         nomeDoAtendente = (await nomesDosAtendentes([ctx.actor.id])).get(ctx.actor.id) ?? null;
       }
-      assinatura = linhaDeAssinatura(configAss, origemDoEmissor, nomeDoAtendente);
+      // #3310: com `por_agente` ligado, a IA assina com o nome do AGENTE QUE
+      // ENVIOU (`ai_agents.name`) — com dois agentes no mesmo número, o cliente
+      // lia o nome de um e a conversa seguia com outro. `nome_ia` fica como
+      // reserva (mensagem sem agente, leitura que falhou).
+      assinatura = linhaDeAssinatura(
+        configAss,
+        origemDoEmissor,
+        nomeDoAtendente,
+        configAss.porAgente ? nomeDoAgente : null,
+      );
     }
   }
 
@@ -845,6 +941,7 @@ export async function sendMessageHandler(
     metadata: {
       ...(input.metadata ?? {}),
       ...(ctx.actor.type === "ai_agent" ? { ai_actor_id: ctx.actor.id } : {}),
+      ...(origemDoEmissor === "ai" ? { ai_actor_name: nomeDoAgente } : {}),
       // Os dois nomes viajam GRAVADOS porque o balão não faz join: "Fulano ·
       // via {token}" é desenhado da própria linha. Vêm DEPOIS de
       // `input.metadata` de propósito — metadata é entrada do cliente, e
@@ -861,6 +958,7 @@ export async function sendMessageHandler(
     },
   };
 
+  await guardServiceEffect();
   let { data: created, error: insErr } = await supabase
     .from("messages")
     .insert(insertRow)
@@ -901,12 +999,23 @@ export async function sendMessageHandler(
   // (`conversations.channel_session_id` é NOT NULL com FK ON DELETE RESTRICT),
   // e ainda assim mantido para não trocar o desfecho desse ramo defensivo.
   const adapter = getAdapter(c.channel_sessions?.provider ?? DEFAULT_CHANNEL_PROVIDER);
+  // Ficha com telefone extra: a resposta volta pelo número que a pessoa escreveu.
+  // A porta de canal decide quem tem isso. A organização vem de `ctx` (fonte
+  // confiável), não do corpo.
+  const ultimoRecebidoChatId = await enderecoDaUltimaRecebida(supabase, {
+    provider: c.channel_sessions?.provider,
+    isGroup: c.is_group,
+    organizationId: ctx.organization_id,
+    conversationId: c.id,
+    contactId: c.contact_id,
+  });
   const chatId = adapter.resolveRecipient({
     isGroup: c.is_group,
     groupChatId: c.group_chat_id,
     phoneNumber: c.contacts?.phone_number,
     waIdentity: c.contacts?.wa_identity,
     waLid: c.contacts?.wa_lid,
+    ultimoRecebidoChatId,
   });
 
   // Releitura no sink: o operador pode ter fechado o canal enquanto o modelo
@@ -1001,17 +1110,26 @@ export async function sendMessageHandler(
     if (updated) message = updated as unknown as Message;
   } else {
     try {
-      // O que separa mídia de texto é a presença de `media` no envelope — o
+      // O `guardServiceEffect` de cada corte relê, pelo pg, a fronteira e a operação do
+      // escopo de execução. Quando o ctx carrega EXATAMENTE essas mesmas, reler
+      // pela REST é a mesma pergunta duas vezes por corte (quatro por bolha). Sem
+      // escopo, ou com escopo diferente (UI, MCP, automação), a REST continua
+      // sendo a única conferência e segue aqui.
+      const fronteiraJaConferida = mesmaFronteira(currentExecutionBoundary(), ctx.serviceBoundary ?? null);
+      const operacaoJaConferida = mesmaOperacao(currentExecutionAgentOperation(), ctx.agentOperation);
       const checkBoundary = async () => {
         await guardServiceEffect();
         await guardAgendaEffect();
         if (ctx.prospectingDelivery) await assertProspectingDelivery(supabase, ctx.prospectingDelivery);
         if (ctx.meetingDelivery) await assertMeetingDeliverySupabase(supabase, ctx.meetingDelivery);
         if (ctx.proactiveContext) await assertAgendaEffectSupabase(supabase, ctx.proactiveContext);
-        if (ctx.serviceBoundary) await assertServiceBoundarySupabase(supabase, ctx.serviceBoundary);
+        if (ctx.serviceBoundary && !fronteiraJaConferida)
+          await assertServiceBoundarySupabase(supabase, ctx.serviceBoundary);
         if (ctx.approvedReply) await prepareApprovedReplySupabase(supabase, ctx.approvedReply);
-        if (ctx.agentOperation) await assertAgentOperationSupabase(supabase, ctx.agentOperation);
+        if (ctx.agentOperation && !operacaoJaConferida)
+          await assertAgentOperationSupabase(supabase, ctx.agentOperation);
       };
+      // O que separa mídia de texto é a presença de `media` no envelope — o
       // adapter preserva o mesmo branch (e a mesma mensagem de erro de cada
       // método) do outro lado do seam.
       let externalId: string | null;
@@ -1038,7 +1156,7 @@ export async function sendMessageHandler(
         // característica do transporte. O caminho de baixo já conferia; o
         // adapter postava direto, e um parâmetro a mais virava `400` cru em vez
         // de "falta o valor {{2}}".
-        await conferirDefinicao(supabase, {
+        const contrato = await conferirDefinicao(supabase, {
           organizationId: ctx.organization_id,
           // A conexão dona da definição: dois números têm modelos diferentes, e
           // conferir a do número errado aprovaria um envio que a plataforma
@@ -1061,6 +1179,7 @@ export async function sendMessageHandler(
                 name: input.template_name ?? "",
                 language: input.template_language ?? "",
                 values: input.template_values ?? {},
+                contrato,
               })
             ).externalId
           : await sendTemplateForSession(supabase, {
@@ -1189,12 +1308,36 @@ export async function sendMessageHandler(
         : [];
       const limparEco = () =>
         removerEcoDoProprioEnvio(supabase, ctx.organization_id, c.id, message.id, externalId, candidatosDoEco);
+      // A FORMA GRAVADA É A CANÔNICA DO CANAL (`adapter.canonicalExternalId`),
+      // não o id cru que o adapter devolveu: é a string que o eco do webhook
+      // grava (a cauda na conversa individual, desde o #1855; o id intacto em
+      // grupo), e o `unique (organization_id, external_id)` só
+      // recusa a segunda linha se os DOIS lados gravarem a MESMA string — é
+      // dele que vem a rede de segurança contra a corrida entre a limpeza e
+      // este UPDATE.
+      //
+      // No NOWEB nada muda: a resposta de envio já é a cauda (`3EB0…`) e a
+      // regra canônica a devolve intacta. No WEBJS ela vem como `_serialized`
+      // (`true_<chat>_3EB0…`); gravada aqui, nunca colidia com a cauda do eco,
+      // o `23505` não disparava e o eco que entrava nesse intervalo nascia como
+      // segunda linha com a mesma frase (#196).
+      //
+      // Os leitores continuam achando o id: `handleAck` e `echoExternalIds`
+      // procuram o par `[composto, cauda]`, sem migration e sem backfill para
+      // as linhas antigas, que guardam o id completo. Editar/apagar uma linha
+      // NOVA gravada em cauda reconstrói o id completo a partir do DESTINATÁRIO
+      // do contato (`resolveRecipient`, que prefere o `@lid`), e não mais do chat
+      // do id gravado — se isso acha a mesma mensagem no WEBJS não foi medido.
+      // Canais que não implementam o método (id simétrico) gravam exatamente o
+      // que o envio devolveu.
+      const idCanonico =
+        externalId !== null ? (adapter.canonicalExternalId?.(externalId) ?? externalId) : null;
       const marcarEnviada = (comId: boolean) =>
         supabase
           .from("messages")
           .update({
             status: "sent",
-            ...(comId ? { external_id: externalId } : {}),
+            ...(comId ? { external_id: idCanonico } : {}),
             ack: 0,
             // Colunas só do template — é o que responde custo e conformidade de
             // janela depois, sem varrer jsonb.
@@ -1314,7 +1457,15 @@ export async function sendMessageHandler(
     // a conversa contando a espera que a própria resposta acabou de encerrar.
     awaiting_since: c.last_inbound_at,
   };
-  if (ctx.actor.type === "user") {
+  // Resposta humana pela TELA ou envio EM NOME DE uma pessoa (#3421): as duas
+  // decisões são de gente da equipe, e a segunda gravava a linha sem calar a
+  // IA — ela respondia junto com o atendente. O envio em nome de atravessa a
+  // rota só com o escopo `messages:on_behalf` + membership validados
+  // (`app/api/v1/messages/route.ts:103-179`), que é a mesma certeza de "foi
+  // pessoa quem decidiu" que o `actor.type === "user"` tem. Mesmo carimbo,
+  // mesma janela, mesma régua de quem lê `bot_silenced_until`; quem NÃO traz
+  // `onBehalfOf` (automação, integração pura, agente) continua de fora.
+  if (ctx.actor.type === "user" || ctx.onBehalfOf) {
     const silenceUntil = extendBotSilence(c.bot_silenced_until, now);
     if (silenceUntil) conversationUpdate.bot_silenced_until = silenceUntil;
   }
@@ -1331,11 +1482,23 @@ export async function sendMessageHandler(
   // única coisa entre esta escrita e outro tenant seria a confiança em
   // `c.contact_id` — e o anti-pattern nº 10 do CLAUDE.md existe justamente
   // porque essa confiança já falhou antes.
-  await supabase
+  //
+  // Sem `await`: é carimbo de listagem, ninguém lê antes da resposta, e esperá-lo
+  // somava uma ida ao banco a cada bolha do agente.
+  void supabase
     .from("contacts")
     .update({ last_activity_at: now })
     .eq("id", c.contact_id)
-    .eq("organization_id", c.organization_id);
+    .eq("organization_id", c.organization_id)
+    .then(({ error }) => {
+      if (error)
+        logger.warn("messages.send.last_activity_failed", {
+          code: error.code,
+          message: error.message,
+          organization_id: c.organization_id,
+          message_id: message.id,
+        });
+    });
 
   }
   const a = actorAuditPayload(ctx.actor);
@@ -1346,7 +1509,9 @@ export async function sendMessageHandler(
   // identidade provada: pô-la na coluna de autor faria o log dizer que ela
   // agiu, quando ninguém a autenticou nesta chamada.
   const emNomeDe = ctx.onBehalfOf ? { on_behalf_of_user_id: ctx.onBehalfOf.userId } : {};
-  await audit({
+  // Fire-and-forget pela doutrina de audit: `audit()` nunca lança e reporta a
+  // própria falha ao Sentry.
+  void audit({
     action: "message.sent",
     actorUserId: a.actorUserId,
     actorApiTokenId: ctx.onBehalfOf ? apiTokenIdDoActor(ctx.actor) : undefined,
@@ -1357,7 +1522,9 @@ export async function sendMessageHandler(
     metadata: { ...a.metadataActor, ...emNomeDe, status: message.status, type: message.type },
   });
 
-  await supabase
+  // Sem `await`: quem consome `message.sent` é o dispatcher do event_log, que lê
+  // depois e por conta própria; nada nesta resposta depende de a linha já existir.
+  void supabase
     .rpc("emit_event", {
       p_event_type: "message.sent",
       p_entity_kind: "message",
@@ -1367,7 +1534,13 @@ export async function sendMessageHandler(
       p_organization_id: c.organization_id,
     })
     .then(({ error }) => {
-      if (error) console.error("[messages.send] emit_event failed", error.message);
+      if (error)
+        logger.error("messages.send.emit_event_failed", {
+          code: error.code,
+          message: error.message,
+          organization_id: c.organization_id,
+          message_id: message.id,
+        });
     });
 
   return message;

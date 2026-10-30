@@ -17,6 +17,7 @@ import { type NextRequest } from "next/server";
 import { z } from "zod";
 
 import { listaAgendamentos, type AgendamentoListado } from "@/lib/agenda/consulta";
+import { DURACAO_MAXIMA_MIN, DURACAO_MINIMA_MIN } from "@/lib/agenda/duracao-escolhida";
 import { donosDaAgenda } from "@/lib/agenda/donos-da-agenda";
 import { lerOcupacaoExterna } from "@/lib/agenda/ocupacao-externa";
 import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
@@ -47,6 +48,7 @@ import {
 type AgendamentoDaResposta = AgendamentoListado & { origem?: "google_sync" };
 
 const listarSchema = z.object({
+  collective_only: z.enum(["true", "false"]).transform((value) => value === "true").optional(),
   contact_id: z.string().uuid().optional(),
   lead_id: z.string().uuid().optional(),
   owner_user_id: z.string().uuid().optional(),
@@ -91,6 +93,18 @@ const marcarSchema = z.object({
   description: z.string().max(2000).optional(),
   location_details: z.string().max(300).optional(),
   guest_email: emailDoConvidado.optional(),
+  /**
+   * A duração DESTE atendimento, em minutos (issue #3709) — ausente, a do tipo.
+   *
+   * A faixa é a dos moldes (`lib/agenda/duracao-escolhida.ts`), e recusar aqui
+   * é o que impede um valor absurdo de virar um bloco de três minutos ou de
+   * 25 horas. O handler confere de novo porque a ferramenta MCP o chama sem
+   * passar por este schema.
+   */
+  duration_minutes: z.number().int().min(DURACAO_MINIMA_MIN).max(DURACAO_MAXIMA_MIN).optional(),
+  participant_name: z.string().trim().min(1).max(120).optional(),
+  participants: z.array(z.string().trim().min(1).max(120)).min(1).max(20).optional(),
+  expected_service_revision: z.number().int().positive().optional(),
 });
 
 const alterarSchema = z
@@ -99,7 +113,7 @@ const alterarSchema = z
     revision: z.number().int().positive().optional(),
     outcome_message_id: z.string().uuid().optional(),
     confirmation_next_at: z.string().datetime({ offset: true }).optional(),
-    /** Remarcar: o novo início. A duração vem do tipo, como na criação. */
+    /** Remarcar: o novo início. O FIM conserva o comprimento do bloco que já existe (#3709). */
     starts_at: z.string().datetime({ offset: true }).optional(),
     /**
      * `rescheduled` NÃO entra aqui: remarcar se pede mandando `starts_at`, e é
@@ -163,6 +177,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 
   const url = new URL(req.url);
   const parsed = listarSchema.safeParse({
+    collective_only: url.searchParams.get("collective_only") ?? undefined,
     contact_id: url.searchParams.get("contact_id") ?? undefined,
     lead_id: url.searchParams.get("lead_id") ?? undefined,
     owner_user_id: url.searchParams.get("owner_user_id") ?? undefined,
@@ -181,6 +196,7 @@ export async function GET(req: NextRequest): Promise<Response> {
 
   const supabase = await createClient();
   const resultado = await listaAgendamentos(supabase, activeOrg.orgId, {
+    ...(parsed.data.collective_only !== undefined ? { somenteColetivas: parsed.data.collective_only } : {}),
     contactId: parsed.data.contact_id ?? null,
     leadId: parsed.data.lead_id ?? null,
     ownerUserId: parsed.data.owner_user_id ?? null,
@@ -217,6 +233,7 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
 
   // ─── A OCUPAÇÃO DO GOOGLE ENTRA AQUI, e não em `listaAgendamentos` ────────
+  if (parsed.data.collective_only) return ok(resultado.agendamentos, { requestId });
   //
   // O defeito, medido em produção em 2026-09-01: 114 eventos vindos do Google no
   // banco, 1 deles na semana desenhada, e a tela mostrando a agenda vazia.

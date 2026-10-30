@@ -10,7 +10,7 @@
  * ─── O que cada caso fecha ──────────────────────────────────────────────────
  *
  * - alíneas preenchidas pelo RESPONSÁVEL (a, c, d) saem de
- *   `organizations.settings.art15`, com "não informado pelo controlador" onde
+ *   `organizations.settings.art15`, com "não informado pelo <papel do país>" (#2344) onde
  *   ele deixou em branco — mentir numa alínea exigida é pior que imprimi-la
  *   vazia;
  * - a alínea f) sai do `autoridadeDeSupervisao` do PERFIL do país (CNPD em
@@ -26,8 +26,9 @@
  *   entrega a promessa e não a cópia. As outras seções têm teto de linhas: o
  *   relatório não diz "completa", e as que bateram no teto vêm em
  *   `secoes_no_limite`;
- * - o Brasil continua SEM a seção e SEM chave nova no `data.json`, que é o
- *   que os fixtures de `lgpd-brasil-antes-do-doc88/` cobrem byte a byte.
+ * - o Brasil continua SEM a seção do art. 15.º, e desde o doc 110 (2A) recebe
+ *   no `data.json` as mesmas `messages_completas` e `secoes_no_limite` — o
+ *   resto dele os fixtures de `lgpd-brasil-antes-do-doc88/` cobrem byte a byte.
  */
 import type { ReactElement, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
@@ -246,20 +247,29 @@ describe("art. 15.º, n.º 1 — alínea a alínea no PDF", () => {
   it("Portugal: sem o responsável preencher, cada alínea diz que não foi informada", async () => {
     const payload = await coleta("PT");
     const tudo = pdf(payload);
-    expect(tudo.match(/não informado pelo controlador/g), "as 3 alíneas vazias").toHaveLength(3);
+    // O vazio repete o nome que a lei DO PAÍS dá ao papel (#2344): em Portugal
+    // a alínea fala em "responsável pelo tratamento", não no controlador da LGPD.
+    expect(
+      tudo.match(/não informado pelo responsável pelo tratamento/g),
+      "as 3 alíneas vazias",
+    ).toHaveLength(3);
+    expect(tudo, "o vazio de Portugal não usa o vocabulário brasileiro").not.toContain(
+      "não informado pelo controlador",
+    );
     // O vazio não pode virar mentira: nenhuma finalidade inventada.
     expect(tudo).not.toContain("Atendimento ao cliente");
   });
 
-  it("Brasil: sem a seção do art. 15.º no PDF e sem chave nova no data.json", async () => {
+  it("Brasil: sem a seção do art. 15.º no PDF; o data.json leva todas as mensagens (doc 110, 2A)", async () => {
     const payload = await coleta(null, SETTINGS_PREENCHIDO);
     expect(payload.art15).toBeUndefined();
-    expect(payload.messages_completas).toBeUndefined();
     const tudo = pdf(payload);
     expect(tudo).not.toContain("art. 15.º, n.º 1");
     expect(tudo).not.toContain("CNPD");
+    expect(tudo, "o PDF brasileiro não cita a ressalva").not.toContain("secoes_no_limite");
     expect(Object.keys(payload)).not.toContain("art15");
-    expect(Object.keys(payload)).not.toContain("messages_completas");
+    expect(payload.messages_recent).toHaveLength(100);
+    expect(payload.messages_completas, "o Brasil ficou no recorte de 100").toHaveLength(TOTAL_MENSAGENS);
   });
 
   it("país sem citação revisada não herda a lista do RGPD nem a CNPD de Portugal", async () => {
@@ -325,8 +335,9 @@ describe("art. 15.º, n.º 3 — a cópia", () => {
     const folgado = await coleta("PT");
     expect(folgado.secoes_no_limite, "nenhuma seção no teto é lista vazia, não ausência").toEqual([]);
 
-    // Brasil: a chave não existe (byte a byte do doc 88).
-    expect(Object.keys(await coleta(null))).not.toContain("secoes_no_limite");
+    // Brasil: o mesmo aviso desde o doc 110 (2A).
+    banco.conversas = Array.from({ length: 500 }, (_, i) => ({ id: `cv${i}`, is_group: false }));
+    expect((await coleta(null)).secoes_no_limite).toEqual(["conversations"]);
   });
 
   it("o data.json leva TODAS as mensagens, contra as 100 do recorte do PDF", async () => {

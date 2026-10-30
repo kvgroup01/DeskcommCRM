@@ -70,10 +70,10 @@ ajustar os intervalos, meça o `app` separadamente antes de mexer em mais nada.
 
 ## 4. Espaço em disco é outra cota (e ela não se resolve com intervalo)
 
-O plano free também limita o **banco** (500 MB), e `job_queue` e `api_audit_log`
-são as duas tabelas que crescem sem ninguém escrever nelas de propósito. Se o
-seu aperto for de espaço e não de tráfego, comece medindo — o ranking abaixo diz
-qual das duas (se alguma) é o seu problema:
+O plano free também limita o **banco** (500 MB), e `job_queue`, `api_audit_log`
+e as tabelas que a IA grava a cada turno (§4.2) crescem sem ninguém escrever
+nelas de propósito. Se o seu aperto for de espaço e não de tráfego, comece
+medindo — o ranking abaixo diz qual delas (se alguma) é o seu problema:
 
 ```bash
 psql "$SUPABASE_DB_URL" -c \
@@ -105,14 +105,16 @@ docker compose -f docker-compose.prod.yml exec app \
   http://localhost:3000/api/v1/cron/data-retention
 ```
 
-A resposta do `curl` traz `fila_tem_resto` / `auditoria_tem_resto`. **`true`
-significa que o teto por invocação foi atingido e sobrou trabalho para a rodada
+A resposta do `curl` traz um campo `*_tem_resto` por tabela podada
+(`fila_tem_resto`, `auditoria_tem_resto`, `telemetria_de_ia_tem_resto`,
+`ritmo_de_envio_tem_resto`, `copias_enviadas_tem_resto`, `checkpoints_tem_resto`
+e os demais). **`true` em qualquer um significa que o teto por invocação foi atingido e sobrou trabalho para a rodada
 seguinte** — normal na primeira poda de uma instalação antiga, e nada a fazer
 além de esperar (ou disparar o `curl` acima algumas vezes).
 
-### 4.2. As duas alavancas, e o que cada uma custa
+### 4.2. As alavancas, e o que cada uma custa
 
-Ambas são opcionais e vivem no `.env`; os defaults funcionam sem editar nada.
+Todas são opcionais e vivem no `.env`; os defaults funcionam sem editar nada.
 
 | chave | default | o que faz |
 |---|---|---|
@@ -128,12 +130,27 @@ retenção volta a receber o aviso de "sou um assistente virtual", e o gate LGPD
 volta a exigir base legal no primeiro toque de prospecção — os dois erram para o
 lado de proteger a mais.
 
+As tabelas que a IA grava a cada turno (migration 0587) têm alavanca própria, no
+mesmo cron e com o piso também dentro do banco:
+
+| chave | default | o que faz |
+|---|---|---|
+| `AI_TELEMETRY_RETENTION_DAYS` | `400` | `llm_calls`, `metrics`, `skill_activations`, `ai_router_decisions` e o traço do turno (`agent_turn_traces`, 9021). Piso de **100** dias. |
+| `PACING_LEDGER_RETENTION_DAYS` | `2` | `pacing_ledger`. Piso de **2**; o último envio de cada número nunca sai. |
+| `OUTBOUND_COPIES_RETENTION_DAYS` | `30` | `outbound_copies`. Piso de **7**; as últimas que o anti-repetição compara nunca saem. |
+| `LEAD_CHECKPOINT_RETENTION_DAYS` | `180` | `lead_checkpoints` já superados. Piso de **30**; o vigente de cada atendimento nunca sai. |
+
+O traço do turno tem um [leitor técnico pela API](../specs/leitor-tecnico-do-traco-do-turno.md), restrito a gerentes da organização. Ele explicita o limite consultável e projeta recibos sem mensagens livres de erro. É uma entrega parcial: a tela permanece na issue #3201; uma lista vazia não prova que houve expurgo.
+
+`event_log` não tem poda, de propósito: é o livro-razão que impede os gatilhos
+de tempo de reenviarem WhatsApp.
+
 O piso do audit não é sugestão de estilo: ele mora **dentro** de
 `fn_expurgar_auditoria_vencida`, então nem quem tem a chave de serviço apaga
 rastro com menos de 90 dias por esse caminho. A função não aceita organização,
 ator, ação nem id — só idade.
 
-Depois de mudar qualquer uma das duas:
+Depois de mudar qualquer uma delas:
 
 ```bash
 docker compose -f docker-compose.prod.yml --env-file .env up -d app scheduler
@@ -147,11 +164,12 @@ as linhas novas ocuparem os buracos. O cron **não** roda `VACUUM FULL` de
 propósito: ele trava a tabela e exige o dobro do tamanho em disco livre, e fazer
 isso sozinho de madrugada num banco de cliente é pior que a cota apertada. Se
 você precisa do espaço de volta AGORA e aceita a janela de indisponibilidade
-daquela tabela:
+daquela tabela, rode para cada tabela que o ranking de §4 apontou (por exemplo
+`job_queue`, `api_audit_log`, `llm_calls`, `metrics`, `pacing_ledger`), uma de
+cada vez:
 
 ```bash
-psql "$SUPABASE_DB_URL" -c "vacuum (full, analyze) public.job_queue;"
-psql "$SUPABASE_DB_URL" -c "vacuum (full, analyze) public.api_audit_log;"
+psql "$SUPABASE_DB_URL" -c "vacuum (full, analyze) public.<tabela>;"
 ```
 
 Quanto está morto e ainda não foi reaproveitado, antes de decidir:
@@ -163,7 +181,26 @@ psql "$SUPABASE_DB_URL" -c \
     where relname in ('job_queue','api_audit_log','send_ledger','before_send_traces');"
 ```
 
-## 5. Se ainda não fechar
+## 5. Quando o compute Nano do plano grátis não basta
+
+O sintoma não é lentidão, é indisponibilidade: o projeto fica fora do ar **sem ninguém usando**, toda chamada a
+`/rest/v1` responde `522` ou `503 PGRST002`, e o `/api/v1/health` diz `supabase: down` com
+`reason: projeto_indisponivel`.
+
+**O que foi medido, e em quantas instalações.** Uma instalação, em 29/10, no compute Nano (0,5 GB): ~6 h fora do ar,
+que só voltou com *Restart project*. O schema tinha 213 tabelas, 584 funções, 684 policies, 759 índices e 222
+triggers; a introspecção do schema cache do PostgREST leva ~722 ms com o banco saudável, contra o `statement_timeout`
+de 8 s do papel `authenticator`. Naquela instalação, a Nano entrou em swap, esgotou o *Disk IO Budget*, e essa
+consulta passou do teto: o cache se perdeu e o PostgREST ficou em laço. **Não está medido** se a Nano falha assim
+em toda instalação: o plano grátis continua sendo o caminho documentado de instalação.
+
+**Se acontecer com você:** *Restart project* devolve o serviço. Se voltar a cair parado, subir o compute para
+**Micro (1 GB)** é o próximo passo a testar: dá o dobro de memória à introspecção. **Não está medido que resolva:**
+na instalação medida (29/10), quem devolveu o serviço foi o *Restart project*. Antes de trocar, confirme que é este ramo e não o
+replay do gateway: `postgrest-replay-do-gateway.md` (seção "Outro ramo: falta de memória/IO") e
+`supabase-compute-insuficiente-free.md`.
+
+## 6. Se ainda não fechar
 
 Abra uma issue com: a saída dos três comandos da seção 1, a janela de tempo que
 elas cobrem, e o painel **Usage** do Supabase no mesmo período. Medição sem a

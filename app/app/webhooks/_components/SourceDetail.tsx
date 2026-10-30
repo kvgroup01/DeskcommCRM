@@ -10,6 +10,7 @@ import { formatDistanceToNowStrict } from "date-fns";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -31,7 +32,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { copyToClipboard } from "@/lib/clipboard";
-import { Copy, Trash, CaretDown } from "@/lib/ui/icons";
+import { Copy, Trash, CaretDown, PencilSimple, Check, X } from "@/lib/ui/icons";
 import { cn } from "@/lib/utils";
 import {
   useDeleteWebhookSource,
@@ -41,7 +42,13 @@ import {
 } from "@/hooks/webhooks/useWebhookSources";
 import { usePermission } from "@/hooks/auth/AuthProvider";
 import { HEADER_ASSINATURA_DE_ENTRADA } from "@/lib/webhooks/assinatura";
+import {
+  gerarHtmlDoFormulario,
+  webhookFormFieldsSchema,
+  type WebhookFormField,
+} from "@/lib/webhooks/formulario";
 import { useT } from "@/hooks/i18n/useT";
+import { WebhookFormFieldsEditor } from "./WebhookFormFieldsEditor";
 
 interface Props {
   source: WebhookSourceRow;
@@ -60,13 +67,14 @@ function publicUrl(pathToken: string): string {
   return `${base}/api/v1/webhooks/in/${pathToken}`;
 }
 
-function formSnippet(url: string, t: (texto: string) => string): string {
-  return `<form action="${url}" method="POST">
-  <input name="nome" placeholder="${t("Seu nome")}" required />
-  <input name="telefone" placeholder="${t("Seu WhatsApp")}" required />
-  <input name="email" type="email" placeholder="${t("Seu e-mail")}" />
-  <button type="submit">${t("Quero receber contato")}</button>
-</form>`;
+function formSnippet(url: string, fields: readonly WebhookFormField[], t: (texto: string) => string): string {
+  return gerarHtmlDoFormulario(url, fields, {
+    nome: t("Seu nome"),
+    telefone: t("Seu WhatsApp"),
+    email: t("Seu e-mail"),
+    enviar: t("Quero receber contato"),
+    selecione: t("Selecione uma opção"),
+  });
 }
 
 /**
@@ -115,8 +123,36 @@ export function SourceDetail({ source, open, onOpenChange }: Props) {
   );
   const [autorizacaoIA, setAutorizacaoIA] = React.useState<{ id: string; ativa: boolean } | null>(null);
   const autorizaIA = autorizacaoIA?.id === source.id ? autorizacaoIA.ativa : source.authorize_ai_on_capture;
+  /**
+   * A opção do #2316, com o mesmo cuidado de estado das outras: `source` é
+   * snapshot, então a resposta do PATCH é o dado mais fresco que esta tela
+   * alcança — e o id junto evita pintar o estado de uma fonte no painel de
+   * outra.
+   */
+  const [atualizacaoDeCard, setAtualizacaoDeCard] = React.useState<{ id: string; ativa: boolean } | null>(null);
+  const atualizaCard =
+    atualizacaoDeCard?.id === source.id
+      ? atualizacaoDeCard.ativa
+      : source.update_existing_lead_on_capture;
+  /**
+   * A opção do #3101, com o mesmo cuidado de estado das irmãs: a resposta do
+   * PATCH é o dado mais fresco que esta tela alcança (`source` é snapshot), e o
+   * id junto evita pintar o estado de uma fonte no painel de outra.
+   */
+  const [reusoDoCardAberto, setReusoDoCardAberto] = React.useState<{ id: string; ativa: boolean } | null>(null);
+  const reusaCardAberto =
+    reusoDoCardAberto?.id === source.id
+      ? reusoDoCardAberto.ativa
+      : source.reuse_open_lead_on_capture;
   const [testing, setTesting] = React.useState(false);
   const [testOk, setTestOk] = React.useState(false);
+  const [formFields, setFormFields] = React.useState<WebhookFormField[]>(source.form_fields ?? []);
+  const [savedFormFields, setSavedFormFields] = React.useState<WebhookFormField[]>(source.form_fields ?? []);
+  const sourceIdDosCampos = React.useRef(source.id);
+  const sourceIdDoNome = React.useRef(source.id);
+  const [nomeFonteSalvo, setNomeFonteSalvo] = React.useState(source.name);
+  const [nomeFonteRascunho, setNomeFonteRascunho] = React.useState(source.name);
+  const [editandoNome, setEditandoNome] = React.useState(false);
   const podeGerirWebhooks = usePermission("webhooks.manage");
   /**
    * `source` é um SNAPSHOT: `SourcesTab` guarda o objeto da lista num estado e
@@ -139,6 +175,7 @@ export function SourceDetail({ source, open, onOpenChange }: Props) {
   const events = eventsRes?.data ?? [];
   const temAssinatura = assinatura?.id === source.id ? assinatura.ativa : source.has_secret;
   const secretRevelado = revelado?.id === source.id ? revelado.valor : null;
+  const formFieldsDirty = JSON.stringify(formFields) !== JSON.stringify(savedFormFields);
 
   const aplicarSecret = (secret: string | null, aviso: string) =>
     update.mutate(
@@ -152,6 +189,61 @@ export function SourceDetail({ source, open, onOpenChange }: Props) {
         },
       },
     );
+  React.useEffect(() => {
+    if (sourceIdDosCampos.current === source.id) return;
+    sourceIdDosCampos.current = source.id;
+    const fields = source.form_fields ?? [];
+    setFormFields(fields);
+    setSavedFormFields(fields);
+  }, [source.id, source.form_fields]);
+
+  React.useEffect(() => {
+    if (sourceIdDoNome.current === source.id) return;
+    sourceIdDoNome.current = source.id;
+    setNomeFonteSalvo(source.name);
+    setNomeFonteRascunho(source.name);
+    setEditandoNome(false);
+  }, [source.id, source.name]);
+
+  const salvarNomeFonte = async () => {
+    const nome = nomeFonteRascunho.trim();
+    if (!nome) {
+      toast.error(t("Informe um nome para a fonte."));
+      return;
+    }
+    try {
+      const res = await update.mutateAsync({ id: source.id, name: nome });
+      setNomeFonteSalvo(res.data.name);
+      setNomeFonteRascunho(res.data.name);
+      setEditandoNome(false);
+      toast.success(t("Nome da fonte atualizado."));
+    } catch {
+      /* erro já mostrado pelo showApiError */
+    }
+  };
+
+  const salvarCamposDoFormulario = async () => {
+    const normalizados = formFields.map((field) => ({
+      ...field,
+      ...(field.type === "select"
+        ? { options: (field.options ?? []).map((option) => option.trim()).filter(Boolean) }
+        : {}),
+    }));
+    const parsed = webhookFormFieldsSchema.safeParse(normalizados);
+    if (!parsed.success) {
+      toast.error(t(parsed.error.issues[0]?.message ?? "Revise os campos do formulário."));
+      return;
+    }
+    try {
+      const res = await update.mutateAsync({ id: source.id, form_fields: parsed.data });
+      const fields = res.data.form_fields ?? parsed.data;
+      setFormFields(fields);
+      setSavedFormFields(fields);
+      toast.success(t("Perguntas do formulário salvas."));
+    } catch {
+      /* erro já mostrado pelo showApiError */
+    }
+  };
 
   const sendTestLead = async () => {
     setTesting(true);
@@ -202,7 +294,70 @@ export function SourceDetail({ source, open, onOpenChange }: Props) {
       <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
         <SheetHeader>
           <div className="flex items-center gap-2">
-            <SheetTitle>{source.name}</SheetTitle>
+            {editandoNome ? (
+              <>
+                <SheetTitle className="sr-only">{nomeFonteSalvo}</SheetTitle>
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <Input
+                    aria-label={t("Nome da fonte")}
+                    autoFocus
+                    value={nomeFonteRascunho}
+                    maxLength={120}
+                    onChange={(event) => setNomeFonteRascunho(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void salvarNomeFonte();
+                      }
+                      if (event.key === "Escape") {
+                        setNomeFonteRascunho(nomeFonteSalvo);
+                        setEditandoNome(false);
+                      }
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="secondary"
+                    aria-label={t("Salvar nome")}
+                    disabled={update.isPending || !nomeFonteRascunho.trim()}
+                    onClick={() => void salvarNomeFonte()}
+                  >
+                    <Check />
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    aria-label={t("Cancelar edição do nome")}
+                    disabled={update.isPending}
+                    onClick={() => {
+                      setNomeFonteRascunho(nomeFonteSalvo);
+                      setEditandoNome(false);
+                    }}
+                  >
+                    <X />
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <div className="flex min-w-0 items-center gap-2">
+                <SheetTitle>{nomeFonteSalvo}</SheetTitle>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  aria-label={t("Editar nome da fonte")}
+                  disabled={!podeGerirWebhooks || update.isPending}
+                  onClick={() => {
+                    setNomeFonteRascunho(nomeFonteSalvo);
+                    setEditandoNome(true);
+                  }}
+                >
+                  <PencilSimple />
+                </Button>
+              </div>
+            )}
             <Badge variant={source.is_active ? "success" : "neutral"}>
               {source.is_active ? t("Ativa") : t("Pausada")}
             </Badge>
@@ -253,15 +408,70 @@ export function SourceDetail({ source, open, onOpenChange }: Props) {
             </p>
           </section>
 
+          <section className="space-y-2 rounded-sm border border-border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="update-existing-lead-on-capture" className="block text-sm font-medium text-text">
+                {t("Atualizar o card quando o envio repete o mesmo cadastro")}
+              </label>
+              <Switch id="update-existing-lead-on-capture" checked={Boolean(atualizaCard)}
+                disabled={!podeGerirWebhooks || update.isPending || (!temAssinatura && !atualizaCard)}
+                onCheckedChange={(ativa) => update.mutate(
+                  { id: source.id, update_existing_lead_on_capture: ativa },
+                  { onSuccess: (res) => setAtualizacaoDeCard({ id: source.id, ativa: res.data.update_existing_lead_on_capture }) },
+                )} />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t("Só para integrações entre sistemas: ligado, um envio com o mesmo external_id que traga dado novo atualiza o card desta fonte — os campos, o título e a etapa pedida em stage, sempre para a frente. Desligado, o padrão, o envio repetido continua sendo reenvio e nada no card muda, nem o que a equipe corrigiu à mão.")}
+            </p>
+            {!temAssinatura && <p className="text-sm text-muted-foreground">
+              {t("Configure a assinatura da fonte antes de deixar a integração atualizar o card. Para remover a assinatura, desligue primeiro a atualização pelo external_id.")}
+            </p>}
+          </section>
+
+          <section className="space-y-2 rounded-sm border border-border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <label htmlFor="reuse-open-lead-on-capture" className="block text-sm font-medium text-text">
+                {t("Reaproveitar o card aberto do contato")}
+              </label>
+              <Switch id="reuse-open-lead-on-capture" checked={Boolean(reusaCardAberto)}
+                disabled={!podeGerirWebhooks || update.isPending || (!temAssinatura && !reusaCardAberto)}
+                onCheckedChange={(ativa) => update.mutate(
+                  { id: source.id, reuse_open_lead_on_capture: ativa },
+                  { onSuccess: (res) => setReusoDoCardAberto({ id: source.id, ativa: res.data.reuse_open_lead_on_capture }) },
+                )} />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {t("Só para fontes com assinatura: ligado, um envio de quem já tem card aberto neste funil atualiza esse card — os campos novos e a etapa da fonte, sempre para a frente — em vez de abrir um segundo card. Desligado, o padrão, cada envio continua virando um card novo.")}
+            </p>
+            {!temAssinatura && <p className="text-sm text-muted-foreground">
+              {t("Configure a assinatura da fonte antes de reaproveitar o card aberto do contato. Para remover a assinatura, desligue primeiro o reaproveitamento do card aberto.")}
+            </p>}
+          </section>
+
+          <section className="space-y-2">
+            <p className="text-sm font-medium text-text">{t("Personalizar perguntas do formulário")}</p>
+            <p className="text-xs text-muted-foreground">
+              {t("As respostas extras ficam nos campos personalizados do lead e no histórico desta captação. O checkbox envia sim ou não; a lista permite escolher uma opção.")}
+            </p>
+            <WebhookFormFieldsEditor fields={formFields} onChange={setFormFields} />
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={!formFieldsDirty || update.isPending}
+              onClick={() => void salvarCamposDoFormulario()}
+            >
+              {update.isPending ? t("Salvando…") : t("Salvar perguntas")}
+            </Button>
+          </section>
           <section className="space-y-2">
             <p className="text-sm font-medium text-text">
               {t("Formulário pronto para colar no seu site")}
             </p>
-            <Textarea readOnly rows={6} value={formSnippet(url, t)} className="font-mono text-xs" />
+            <Textarea readOnly rows={Math.min(24, 8 + formFields.length * 3)} value={formSnippet(url, formFields, t)} className="font-mono text-xs" />
             <Button
               type="button"
               variant="secondary"
-              onClick={() => copy(formSnippet(url, t), t("Formulário copiado."), t)}
+              onClick={() => copy(formSnippet(url, formFields, t), t("Formulário copiado."), t)}
             >
               <Copy /> {t("Copiar formulário")}
             </Button>

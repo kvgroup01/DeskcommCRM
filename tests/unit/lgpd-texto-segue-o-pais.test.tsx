@@ -16,6 +16,38 @@
  * Exceção deliberada: `pdf-textos-cpf-da-conversa-e-aviso.txt` foi REGRAVADO
  * no PR #2355 (issue #2341), que troca no Brasil também o ponteiro "valor no
  * arquivo de dados" pelo CPF mascarado. Essa linha não é mais a de antes.
+ *
+ * Segunda exceção deliberada: `email.json` foi REGRAVADO pelo doc 103 (resposta
+ * A), que passa a entregar ao titular brasileiro o link do arquivo de dados. A
+ * diferença é só essa: um parágrafo com o link no HTML e, no texto, o link e
+ * "Os dois links expiram" no lugar de "O link expira". O resto segue byte a byte.
+ *
+ * Quarta exceção, esta também regravando fixture, e por decisão escrita na
+ * issue #2344: o rótulo da citação brasileiro deixa de ser "Base legal" — o
+ * art. 18 da LGPD é um DIREITO do titular, e a base legal fica nos arts. 7 e
+ * 11 (Portugal já rotulava "Direito exercido"). Só a PALAVRA do rótulo muda;
+ * a citação, o prazo, os links e a estrutura continuam os mesmos, e as
+ * comparações seguem byte a byte contra o fixture regravado.
+ *
+ * Quinta exceção: o rodapé do PDF virou UMA string no JSX (o rótulo vem do
+ * perfil, e não mais de texto estático ao lado da interpolação). O `join` por
+ * filho de texto perdeu separadores (`\u0001`) que eram detalhe do parser — o
+ * TEXTO visível do rodapé não muda, e `lgpd-pdf-meet.test.ts` continua casando
+ * a extração do PDF real.
+ *
+ *
+ * Terceira exceção, e esta NÃO regrava fixture: o doc 110 (resposta 2A) dá ao
+ * `data.json` brasileiro TODAS as mensagens (`messages_completas`) e a lista
+ * das seções no limite (`secoes_no_limite`), como Portugal. `data-*.json`
+ * segue o gravado em c85293f05: o payload brasileiro é comparado a ele SEM
+ * essas duas chaves (`semAsChavesDoDoc110`), o que prova que nenhuma outra
+ * mudou, e um caso à parte cobra que as duas estão lá.
+ *
+ * Sexta exceção, regravando `data-*.json`: a seção `lead_attachments` (#3229),
+ * os anexos dos negócios do titular. Entra pela regra já escrita para
+ * `lead_notes` (#1957, Art. 18 II): o que a cascata apaga a pedido dele é o que
+ * se entrega a pedido dele. A diferença nos dois arquivos é só a linha
+ * `"lead_attachments": []`; o resto segue byte a byte.
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -158,8 +190,16 @@ async function dataJson(country: string | null, timezone: string, pais?: string 
   return { vazio, cheio };
 }
 
-/** O JSON como o worker o grava (`JSON.stringify(data, null, 2)`), sem o relógio. */
+/**
+ * O PAYLOAD serializado, sem o relógio. Desde o doc 103 o arquivo que o worker
+ * sobe é `copiaDoTitular(data)` (`lgpd-copia-do-titular.test.ts`); estes
+ * fixtures travam o payload de onde saem o PDF e essa cópia.
+ */
 const comoGravado = (p: ExportPayload) => JSON.stringify({ ...p, generated_at: "X" }, null, 2);
+
+/** O payload brasileiro menos as duas chaves que o doc 110 (2A) acrescentou — ver o cabeçalho. */
+const semAsChavesDoDoc110 = ({ messages_completas: _m, secoes_no_limite: _s, ...resto }: ExportPayload) =>
+  resto as ExportPayload;
 
 function textos(no: ReactNode): string[] {
   if (no === null || no === undefined || typeof no === "boolean") return [];
@@ -202,7 +242,7 @@ function pdfDe(
 }
 
 describe("e-mail ao titular", () => {
-  it("Brasil: igual, byte a byte, ao que saía antes do doc 88", async () => {
+  it("Brasil: o de antes do doc 88, byte a byte, mais o link do arquivo de dados (doc 103, A)", async () => {
     expect(JSON.stringify(await emailPara(perfilDoPais("BR")), null, 2)).toBe(fixture("email.json"));
   });
 
@@ -281,10 +321,18 @@ describe("alarme ao encarregado", () => {
 });
 
 describe("data.json e PDF de acesso", () => {
-  it("Brasil: o data.json é o de antes, sem `lei_rotulo` nem `fuso`", async () => {
+  it("Brasil: o data.json é o de antes, sem `lei_rotulo` nem `fuso` — fora as duas chaves do doc 110", async () => {
     const { vazio, cheio } = await dataJson(null, "America/Sao_Paulo");
     expect(comoGravado(vazio)).toBe(fixture("data-vazio.json"));
-    expect(comoGravado(cheio)).toBe(fixture("data-cheio.json"));
+    expect(comoGravado(semAsChavesDoDoc110(cheio))).toBe(fixture("data-cheio.json"));
+    // Doc 110, 2A: as duas chaves que a trava do doc 88 segurava, e só elas.
+    expect(cheio.messages_completas).toEqual([]);
+    expect(cheio.secoes_no_limite).toEqual([]);
+    const gravadas = Object.keys(JSON.parse(fixture("data-cheio.json")));
+    expect(Object.keys(JSON.parse(comoGravado(cheio))).filter((k) => !gravadas.includes(k))).toEqual([
+      "messages_completas",
+      "secoes_no_limite",
+    ]);
     for (const p of [vazio, cheio]) {
       expect(Object.keys(p)).not.toContain("lei_rotulo");
       expect(Object.keys(p)).not.toContain("fuso");
@@ -300,7 +348,9 @@ describe("data.json e PDF de acesso", () => {
     }
   });
 
-  it("Brasil: o texto do PDF é o de antes, com \"Base legal\"", async () => {
+  it("Brasil: o texto do PDF é o de antes, com o rótulo \"Direito exercido\" (#2344)", async () => {
+    // O rótulo vem do PERFIL do Brasil (`lei.rotuloNoDocumento`), e não mais
+    // de um literal no renderizador: o art. 18 é um direito, não uma base.
     const { cheio } = await dataJson(null, "America/Sao_Paulo");
     expect(pdfDe(cheio).join("\u0001")).toBe(fixture("pdf-textos.txt"));
   });
@@ -336,7 +386,7 @@ describe("data.json e PDF de acesso", () => {
     expect(cheio.lei_citada).toBe("RGPD art. 15.º (Regulamento (UE) 2016/679)");
     expect(cheio.documento_rotulo).toBe("NIF");
     const { cheio: semPais } = await dataJson("BR", "America/Sao_Paulo");
-    expect(comoGravado(semPais)).toBe(fixture("data-cheio.json"));
+    expect(comoGravado(semAsChavesDoDoc110(semPais))).toBe(fixture("data-cheio.json"));
   });
 
   it("o worker lê o país uma vez e passa o mesmo perfil ao coletor e ao e-mail", () => {

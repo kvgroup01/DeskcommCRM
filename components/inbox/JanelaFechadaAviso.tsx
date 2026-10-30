@@ -2,12 +2,15 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useT } from "@/hooks/i18n/useT";
+import { motivoDaFalhaDaMensagem } from "@/lib/inbox/motivo-da-falha";
 
 import { Button } from "@/components/ui/button";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiClient } from "@/lib/api/client";
 import { useSendMessage } from "@/hooks/inbox/useSendMessage";
+import { PreviaDoModelo } from "@/components/channels/PreviaDoModelo";
+import { renderTemplatePreview } from "@/lib/channels/meta/render-template";
 import { fonteDeTemplates, rotaDeTemplates } from "@/lib/channels/templates-fonte";
 import { lerConteudo } from "@/lib/channels/template-conteudo";
 import { cn } from "@/lib/utils";
@@ -42,6 +45,20 @@ import { cn } from "@/lib/utils";
  * deste lado. A chave de cada valor é a `valueKey` que a rota calcula com
  * `slotKey`, a MESMA função que monta o payload de envio: cabeçalho de mídia e
  * `{{1}}` do corpo têm a mesma `key` e só o endereço os separa.
+ *
+ * ─── A prévia em tempo real (#2446) ─────────────────────────────────────────
+ *
+ * O atendente preenchia os campos sem ver o resultado: a tela mostrava só o
+ * rótulo de cada slot, e o valor no campo errado (ou a frase sem sentido) só se
+ * descobria depois, na bolha — quando a janela já não deixa corrigir. Agora a
+ * escolha do modelo abre a prévia da mensagem INTEIRA: cabeçalho (mídia desenhada
+ * do link), corpo, rodapé e botões, com cada `{{n}}` trocado pelo valor conforme
+ * ele é digitado, e o que continua vazio aparecendo como `{{n}}` destacado.
+ *
+ * A prévia é filha do envio, não irmã gêmea: ela sai de `renderTemplatePreview`,
+ * que compartilha com `renderTemplateBody` (o texto que a cadeia `before_send`
+ * avalia como o que o LEAD vai ler) o mapa de valores por `slotKey` e a troca do
+ * placeholder. Duas rotinas de substituição teriam como divergir; uma só, não.
  *
  * ─── O link salvo no modelo ─────────────────────────────────────────────────
  *
@@ -151,6 +168,20 @@ export function JanelaFechadaAviso({
   // experiência que este conserto existe para acabar.
   const faltando = slots.filter((s) => !(valores[s.valueKey] ?? "").trim());
 
+  // A prévia é remontada a cada tecla — é ela que mostra o resultado do
+  // preenchimento ENQUANTO ele acontece (#2446). Sai da MESMA função que monta
+  // o texto do envio (`renderTemplatePreview` e `renderTemplateBody` são o mesmo
+  // núcleo), então prévia e mensagem enviada não têm como divergir. Sem
+  // `useMemo` aqui de propósito: o React Compiler recusa memoização cuja
+  // dependência (`valores`) é reatribuída adiante, e derivar o contrato de um
+  // modelo cabe em microssegundos — não vale uma memoização que o compiler veta.
+  const previa = atual
+    ? renderTemplatePreview(atual.components ?? [], valores, {
+        name: atual.name,
+        language: atual.language,
+      })
+    : null;
+
   /** Trocar de modelo zera os valores (chave de um não vale para o outro) e traz os salvos. */
   function escolher(valor: string) {
     setEscolhido(valor);
@@ -214,7 +245,7 @@ export function JanelaFechadaAviso({
         onSuccess: (res) => {
           const enviada = res.data;
           if (enviada?.status === "failed") {
-            toast.error(enviada.error_message ?? t("Não consegui enviar o modelo."));
+            toast.error(t("Não consegui enviar o modelo."), { description: motivoDaFalhaDaMensagem(enviada, t) });
             return;
           }
           salvarNoModelo(modelo, enviados);
@@ -250,7 +281,9 @@ export function JanelaFechadaAviso({
             disabled={send.isPending}
             aria-label={t("Modelo aprovado")}
             className={cn(
-              "h-9 min-w-[16rem] flex-1 rounded-md border border-input bg-background px-2 text-sm",
+              // 16px e 44px no toque: o Safari do iPhone amplia a página ao
+              // focar campo com fonte menor (F2).
+              "h-11 min-w-[16rem] flex-1 rounded-md border border-input bg-background px-2 text-base md:text-sm lg:h-9",
               "focus:outline-hidden focus:ring-1 focus:ring-ring",
             )}
           >
@@ -275,6 +308,12 @@ export function JanelaFechadaAviso({
         </div>
       )}
 
+      {/* A prévia vem ANTES dos campos: escolher o modelo mostra na hora como a
+          mensagem vai ficar para o cliente, e os `{{n}}` destacados dizem o que
+          ainda falta preencher — a pergunta que antes só se respondia depois do
+          envio, na bolha da conversa (#2446). */}
+      {previa && <PreviaDoModelo previa={previa} />}
+
       {slots.length > 0 && (
         <div className="mt-2 flex flex-col gap-2">
           {slots.map((slot) => (
@@ -291,7 +330,7 @@ export function JanelaFechadaAviso({
                 disabled={send.isPending}
                 placeholder={ehMidia(slot) ? "https://…" : ""}
                 className={cn(
-                  "h-9 rounded-md border border-input bg-background px-2 text-sm",
+                  "h-11 rounded-md border border-input bg-background px-2 text-base md:text-sm lg:h-9",
                   "focus:outline-hidden focus:ring-1 focus:ring-ring",
                 )}
               />
