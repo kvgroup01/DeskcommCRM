@@ -126,11 +126,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   };
 
   try {
-    // Clique duplo em "Criar" sem a chave criaria DOIS grupos no WhatsApp de
-    // pessoas reais — e grupo criado não se desfaz pelo CRM.
+    // A tela SEMPRE manda a chave: clique duplo em "Criar" sem ela criaria DOIS
+    // grupos no WhatsApp de pessoas reais, e grupo criado não se desfaz pelo CRM.
     if (chave === null) {
       const r = await executar();
-      return ok(r.resposta, { requestId, status: r.status });
+      return ok(r.resposta, { requestId, status: 201 });
     }
     const desfecho = await comIdempotencia({
       db: await createClient(),
@@ -146,7 +146,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (desfecho.tipo === "em_curso") {
       return fail("idempotency_in_progress", "A mesma requisição ainda está em curso. Tente de novo em instantes.", 409, { requestId });
     }
-    return ok(desfecho.resposta, { requestId, status: desfecho.status });
+    // O replay devolve o grupo da primeira execução — o mesmo 201.
+    return ok(desfecho.resposta, { requestId, status: 201 });
   } catch (err) {
     return falhaDeGestao(err, requestId);
   }
