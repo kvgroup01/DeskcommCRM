@@ -10,6 +10,10 @@
  * A IA nunca responde em grupo — o texto do cabeçalho diz isso, para que ligar
  * um grupo não pareça "a IA vai atender aqui também".
  *
+ * "Criar grupo" e "Gerenciar" trocam o conteúdo desta mesma folha pela
+ * administração do grupo (`GrupoGestao.tsx`): ligar na inbox e administrar são
+ * perguntas diferentes, e criar um grupo NÃO o liga aqui.
+ *
  * Um número pode estar em 100+ grupos: a lista SEMPRE rola dentro do próprio
  * container (`overflow-y-auto` + `min-h-0 flex-1`), nunca a folha inteira —
  * cabeçalho, busca, contador e ações continuam visíveis. Sem isso, grupo além
@@ -28,6 +32,8 @@ import {
 } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { useT } from "@/hooks/i18n/useT";
+
+import { CriarGrupo, GrupoGestao } from "./GrupoGestao";
 
 interface Grupo {
   chatId: string;
@@ -99,6 +105,9 @@ export function GruposSheet({
     alvos: Grupo[];
     mostrarAvisoDeVolume: boolean;
   } | null>(null);
+  const [tela, setTela] = useState<
+    { tipo: "lista" } | { tipo: "criar" } | { tipo: "gerir"; chatId: string; aviso: string | null }
+  >({ tipo: "lista" });
   const [progresso, setProgresso] = useState<{
     atual: number;
     total: number;
@@ -234,11 +243,42 @@ export function GruposSheet({
           </SheetDescription>
         </SheetHeader>
 
+        {tela.tipo === "criar" && (
+          <CriarGrupo
+            channelId={channelId}
+            onVoltar={() => setTela({ tipo: "lista" })}
+            onCriado={(chatId, resumo) => {
+              void carregar();
+              setTela({ tipo: "gerir", chatId, aviso: resumo });
+            }}
+          />
+        )}
+
+        {tela.tipo === "gerir" && (
+          <GrupoGestao
+            key={tela.chatId}
+            channelId={channelId}
+            chatId={tela.chatId}
+            avisoInicial={tela.aviso}
+            onVoltar={(mudouLista) => {
+              if (mudouLista) void carregar();
+              setTela({ tipo: "lista" });
+            }}
+          />
+        )}
+
+        {tela.tipo === "lista" && (
+        <>
         <div className="flex flex-col gap-2 pb-2 pt-3">
           <div className="flex items-center justify-between gap-2">
-            <Button variant="outline" size="sm" onClick={() => void carregar()}>
-              {t("Atualizar lista")}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => void carregar()}>
+                {t("Atualizar lista")}
+              </Button>
+              <Button size="sm" disabled={progresso !== null} onClick={() => setTela({ tipo: "criar" })}>
+                {t("Criar grupo")}
+              </Button>
+            </div>
             <div className="flex items-center gap-2">
               {alvosParaLigar.length > 0 && (
                 <Button
@@ -366,12 +406,24 @@ export function GruposSheet({
                     </p>
                   )}
                 </div>
-                <Switch
-                  aria-label={g.subject ?? t("Grupo sem nome")}
-                  checked={g.enabled}
-                  disabled={salvando === g.chatId || progresso !== null}
-                  onCheckedChange={(v) => alternar(g, v)}
-                />
+                <div className="flex shrink-0 items-center gap-2">
+                  {g.presente && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={progresso !== null}
+                      onClick={() => setTela({ tipo: "gerir", chatId: g.chatId, aviso: null })}
+                    >
+                      {t("Gerenciar")}
+                    </Button>
+                  )}
+                  <Switch
+                    aria-label={g.subject ?? t("Grupo sem nome")}
+                    checked={g.enabled}
+                    disabled={salvando === g.chatId || progresso !== null}
+                    onCheckedChange={(v) => alternar(g, v)}
+                  />
+                </div>
               </li>
             ))}
           </ul>
@@ -384,6 +436,8 @@ export function GruposSheet({
             <p className="text-sm text-muted-foreground">{t("Nenhum grupo encontrado")}</p>
           )}
         </div>
+        </>
+        )}
       </SheetContent>
     </Sheet>
   );

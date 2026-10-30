@@ -40,7 +40,9 @@ describe("respostas de grupo do WAHA", () => {
         name: "Clientes",
         groupMetadata: {
           desc: "regras",
-          participants: [{ id: { _serialized: "5531999990000@c.us" }, isAdmin: true, isSuperAdmin: false }],
+          participants: [
+            { id: { _serialized: "5531999990000@c.us" }, isAdmin: true, isSuperAdmin: false },
+          ],
         },
       },
       "1203@g.us",
@@ -77,7 +79,9 @@ describe("respostas de grupo do WAHA", () => {
   });
 
   it("link de convite a partir de texto, JSON com aspas ou objeto", () => {
-    expect(lerLinkDeConvite("https://chat.whatsapp.com/AbC123")).toBe("https://chat.whatsapp.com/AbC123");
+    expect(lerLinkDeConvite("https://chat.whatsapp.com/AbC123")).toBe(
+      "https://chat.whatsapp.com/AbC123",
+    );
     expect(lerLinkDeConvite('"AbC123"')).toBe("https://chat.whatsapp.com/AbC123");
     expect(lerLinkDeConvite({ inviteCode: "AbC123" })).toBe("https://chat.whatsapp.com/AbC123");
     expect(lerLinkDeConvite("")).toBeNull();

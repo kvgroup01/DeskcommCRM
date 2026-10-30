@@ -15,14 +15,25 @@ import { fail, ok } from "@/lib/api/wrappers";
 import { alterarParticipantes, TETO_DE_PARTICIPANTES } from "@/lib/grupos/gestao";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 
-import { falhaDeGestao, prepararPedidoDeGrupo, telefoneDigitado, type ContextoDoGrupo } from "../../_comum";
+import {
+  falhaDeGestao,
+  prepararPedidoDeGrupo,
+  telefoneDigitado,
+  type ContextoDoGrupo,
+} from "../../_comum";
 
 export const dynamic = "force-dynamic";
 
-const jids = z.array(z.string().regex(/^\d+@(c\.us|s\.whatsapp\.net|lid)$/)).min(1).max(TETO_DE_PARTICIPANTES);
+const jids = z
+  .array(z.string().regex(/^\d+@(c\.us|s\.whatsapp\.net|lid)$/))
+  .min(1)
+  .max(TETO_DE_PARTICIPANTES);
 
 const corpoSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("add"), phones: z.array(telefoneDigitado).min(1).max(TETO_DE_PARTICIPANTES) }),
+  z.object({
+    action: z.literal("add"),
+    phones: z.array(telefoneDigitado).min(1).max(TETO_DE_PARTICIPANTES),
+  }),
   z.object({ action: z.literal("remove"), participant_ids: jids }),
   z.object({ action: z.literal("promote"), participant_ids: jids }),
   z.object({ action: z.literal("demote"), participant_ids: jids }),
@@ -34,11 +45,17 @@ export async function POST(req: NextRequest, ctx: ContextoDoGrupo): Promise<Resp
   const p = await prepararPedidoDeGrupo(ctx);
   if (!p.ok) return p.response;
   const corpo = corpoSchema.safeParse(await req.json().catch(() => null));
-  if (!corpo.success) return fail("validation_error", "dados inválidos", 400, { requestId: p.requestId });
+  if (!corpo.success)
+    return fail("validation_error", "dados inválidos", 400, { requestId: p.requestId });
   try {
     const r =
       corpo.data.action === "add"
-        ? await alterarParticipantes(p.deps, { ...p.alvo, ...p.ator, action: "add", phones: [...new Set(corpo.data.phones)] })
+        ? await alterarParticipantes(p.deps, {
+            ...p.alvo,
+            ...p.ator,
+            action: "add",
+            phones: [...new Set(corpo.data.phones)],
+          })
         : await alterarParticipantes(p.deps, {
             ...p.alvo,
             ...p.ator,

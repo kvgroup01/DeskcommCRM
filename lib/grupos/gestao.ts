@@ -24,7 +24,11 @@ import { audit as auditReal } from "@/lib/audit";
 import type { AuditAction } from "@/lib/audit/actions";
 import { capabilitiesOf, getAdapter } from "@/lib/channels";
 import { phoneLookupVariants } from "@/lib/channels/phone-variants";
-import { resolveSessionRef, CHANNEL_SESSION_REF_COLUMNS, type ChannelSessionRef } from "@/lib/channels/session-ref";
+import {
+  resolveSessionRef,
+  CHANNEL_SESSION_REF_COLUMNS,
+  type ChannelSessionRef,
+} from "@/lib/channels/session-ref";
 import type {
   ChannelGroup,
   ChannelGroupAdmin,
@@ -69,7 +73,10 @@ export interface GrupoDetalhado extends Omit<ChannelGroupDetails, "participants"
 }
 
 export interface DepsDeGestao {
-  lerSessao(org: string, sessionId: string): Promise<{
+  lerSessao(
+    org: string,
+    sessionId: string,
+  ): Promise<{
     sessionRef: string;
     admin: ChannelGroupAdmin | null;
     listGroups: (() => Promise<ChannelGroup[]>) | null;
@@ -78,7 +85,9 @@ export interface DepsDeGestao {
   contatosConhecidos(
     org: string,
     busca: { phones: string[]; lids: string[] },
-  ): Promise<Array<{ id: string; name: string | null; phone_number: string | null; wa_lid: string | null }>>;
+  ): Promise<
+    Array<{ id: string; name: string | null; phone_number: string | null; wa_lid: string | null }>
+  >;
   audit(entry: {
     action: AuditAction;
     organizationId: string;
@@ -121,13 +130,18 @@ function mesmaPessoa(jid: string): string {
   return jid.replace(/@s\.whatsapp\.net$/, "@c.us");
 }
 
-async function detalhar(deps: DepsDeGestao, org: string, d: ChannelGroupDetails): Promise<GrupoDetalhado> {
+async function detalhar(
+  deps: DepsDeGestao,
+  org: string,
+  d: ChannelGroupDetails,
+): Promise<GrupoDetalhado> {
   const phones = d.participants.flatMap((p) => {
     const tel = telefoneDoJid(p.id);
     return tel ? phoneLookupVariants(tel) : [];
   });
   const lids = d.participants.map((p) => lidDoJid(p.id)).filter((x): x is string => x !== null);
-  const contatos = phones.length + lids.length > 0 ? await deps.contatosConhecidos(org, { phones, lids }) : [];
+  const contatos =
+    phones.length + lids.length > 0 ? await deps.contatosConhecidos(org, { phones, lids }) : [];
   return {
     ...d,
     participants: d.participants.map((p) => {
@@ -135,7 +149,9 @@ async function detalhar(deps: DepsDeGestao, org: string, d: ChannelGroupDetails)
       const lid = lidDoJid(p.id);
       const variantes = tel ? new Set(phoneLookupVariants(tel)) : null;
       const c = contatos.find(
-        (x) => (lid !== null && x.wa_lid === lid) || (variantes !== null && x.phone_number !== null && variantes.has(x.phone_number)),
+        (x) =>
+          (lid !== null && x.wa_lid === lid) ||
+          (variantes !== null && x.phone_number !== null && variantes.has(x.phone_number)),
       );
       return { id: p.id, role: p.role, phone: tel, contact: c ? { id: c.id, name: c.name } : null };
     }),
@@ -145,7 +161,11 @@ async function detalhar(deps: DepsDeGestao, org: string, d: ChannelGroupDetails)
 export async function lerGrupo(deps: DepsDeGestao, e: Alvo): Promise<GrupoDetalhado> {
   chatIdDeGrupo.parse(e.chatId);
   const s = await adminDaSessao(deps, e.organizationId, e.channelSessionId);
-  return detalhar(deps, e.organizationId, await s.admin.getGroup({ sessionRef: s.sessionRef, chatId: e.chatId }));
+  return detalhar(
+    deps,
+    e.organizationId,
+    await s.admin.getGroup({ sessionRef: s.sessionRef, chatId: e.chatId }),
+  );
 }
 
 /** Cada telefone vira o JID que o WhatsApp endereça; o que não tem WhatsApp volta à parte. */
@@ -179,7 +199,9 @@ export async function criarGrupo(
   // meus contatos" barra a adição). A releitura diz quem está lá.
   const depois = await s.admin.getGroup({ sessionRef: s.sessionRef, chatId });
   const presentes = new Set(depois.participants.map((p) => mesmaPessoa(p.id)));
-  const naoEntraram = resolvidos.filter((r) => !r.aliases.some((a) => presentes.has(mesmaPessoa(a)))).map((r) => r.phone);
+  const naoEntraram = resolvidos
+    .filter((r) => !r.aliases.some((a) => presentes.has(mesmaPessoa(a))))
+    .map((r) => r.phone);
 
   await deps.audit({
     action: "channel.group_created",
@@ -220,10 +242,11 @@ function aplicou(
 
 export async function alterarParticipantes(
   deps: DepsDeGestao,
-  e: Alvo & Ator & { action: GroupParticipantsAction } & (
-    | { phones: string[]; participantIds?: undefined }
-    | { participantIds: string[]; phones?: undefined }
-  ),
+  e: Alvo &
+    Ator & { action: GroupParticipantsAction } & (
+      | { phones: string[]; participantIds?: undefined }
+      | { participantIds: string[]; phones?: undefined }
+    ),
 ): Promise<{ confirmados: string[]; naoAplicados: string[]; semWhatsapp: string[] }> {
   chatIdDeGrupo.parse(e.chatId);
   const s = await adminDaSessao(deps, e.organizationId, e.channelSessionId);
@@ -250,8 +273,12 @@ export async function alterarParticipantes(
 
   const depois = await s.admin.getGroup({ sessionRef: s.sessionRef, chatId: e.chatId });
   const porJid = new Map(depois.participants.map((p) => [mesmaPessoa(p.id), p.role]));
-  const confirmados = alvos.filter((a) => aplicou(e.action, a.aliases, porJid)).map((a) => a.rotulo);
-  const naoAplicados = alvos.filter((a) => !aplicou(e.action, a.aliases, porJid)).map((a) => a.rotulo);
+  const confirmados = alvos
+    .filter((a) => aplicou(e.action, a.aliases, porJid))
+    .map((a) => a.rotulo);
+  const naoAplicados = alvos
+    .filter((a) => !aplicou(e.action, a.aliases, porJid))
+    .map((a) => a.rotulo);
 
   await deps.audit({
     action: "channel.group_participants_changed",
@@ -277,24 +304,32 @@ type Campo = "subject" | "description" | "onlyAdminsSend" | "onlyAdminsEditInfo"
 
 export async function atualizarDados(
   deps: DepsDeGestao,
-  e: Alvo & Ator & {
-    subject?: string;
-    description?: string;
-    onlyAdminsSend?: boolean;
-    onlyAdminsEditInfo?: boolean;
-  },
+  e: Alvo &
+    Ator & {
+      subject?: string;
+      description?: string;
+      onlyAdminsSend?: boolean;
+      onlyAdminsEditInfo?: boolean;
+    },
 ): Promise<{ grupo: GrupoDetalhado; naoAplicados: Campo[] }> {
   chatIdDeGrupo.parse(e.chatId);
   const s = await adminDaSessao(deps, e.organizationId, e.channelSessionId);
   const base = { sessionRef: s.sessionRef, chatId: e.chatId };
   if (e.subject !== undefined) await s.admin.setSubject({ ...base, subject: e.subject });
-  if (e.description !== undefined) await s.admin.setDescription({ ...base, description: e.description });
+  if (e.description !== undefined)
+    await s.admin.setDescription({ ...base, description: e.description });
   if (e.onlyAdminsSend !== undefined || e.onlyAdminsEditInfo !== undefined) {
-    await s.admin.setSettings({ ...base, onlyAdminsSend: e.onlyAdminsSend, onlyAdminsEditInfo: e.onlyAdminsEditInfo });
+    await s.admin.setSettings({
+      ...base,
+      onlyAdminsSend: e.onlyAdminsSend,
+      onlyAdminsEditInfo: e.onlyAdminsEditInfo,
+    });
   }
 
   const depois = await s.admin.getGroup(base);
-  const pedidos = (["subject", "description", "onlyAdminsSend", "onlyAdminsEditInfo"] as const).filter((c) => e[c] !== undefined);
+  const pedidos = (
+    ["subject", "description", "onlyAdminsSend", "onlyAdminsEditInfo"] as const
+  ).filter((c) => e[c] !== undefined);
   // Campo que o WhatsApp não devolve na leitura (`null`) não dá para conferir;
   // ele não conta como recusado — conta como recusado só o que voltou DIFERENTE.
   const naoAplicados = pedidos.filter((c) => depois[c] !== null && depois[c] !== e[c]);
@@ -305,9 +340,15 @@ export async function atualizarDados(
     actorUserId: e.actorUserId,
     resourceId: e.channelSessionId,
     requestId: e.requestId,
-    metadata: { channel_session_id: e.channelSessionId, group_chat_id: e.chatId, campos: pedidos, nao_aplicados: naoAplicados },
+    metadata: {
+      channel_session_id: e.channelSessionId,
+      group_chat_id: e.chatId,
+      campos: pedidos,
+      nao_aplicados: naoAplicados,
+    },
   });
-  if (pedidos.length > 0 && naoAplicados.length === pedidos.length) throw new GestaoDeGrupoError("nao_confirmado");
+  if (pedidos.length > 0 && naoAplicados.length === pedidos.length)
+    throw new GestaoDeGrupoError("nao_confirmado");
   return { grupo: await detalhar(deps, e.organizationId, depois), naoAplicados };
 }
 
@@ -317,7 +358,10 @@ export async function linkDeConvite(deps: DepsDeGestao, e: Alvo): Promise<{ link
   return { link: await s.admin.getInviteLink({ sessionRef: s.sessionRef, chatId: e.chatId }) };
 }
 
-export async function revogarConvite(deps: DepsDeGestao, e: Alvo & Ator): Promise<{ link: string }> {
+export async function revogarConvite(
+  deps: DepsDeGestao,
+  e: Alvo & Ator,
+): Promise<{ link: string }> {
   chatIdDeGrupo.parse(e.chatId);
   const s = await adminDaSessao(deps, e.organizationId, e.channelSessionId);
   const antes = await s.admin.getInviteLink({ sessionRef: s.sessionRef, chatId: e.chatId });
@@ -371,7 +415,8 @@ export function criarDepsDeGestao(admin: SupabaseClient): DepsDeGestao {
       const adapter = getAdapter(ref.provider);
       const sessionRef = resolveSessionRef(ref);
       // Só canal com grupos `full` administra: `limited` lista, mas não é dono do grupo.
-      const gerencia = capabilitiesOf(ref.provider).groups === "full" ? (adapter.groupAdmin ?? null) : null;
+      const gerencia =
+        capabilitiesOf(ref.provider).groups === "full" ? (adapter.groupAdmin ?? null) : null;
       return {
         sessionRef,
         admin: gerencia,
@@ -382,13 +427,30 @@ export function criarDepsDeGestao(admin: SupabaseClient): DepsDeGestao {
       const campos = "id, name, phone_number, wa_lid";
       const [porTelefone, porLid] = await Promise.all([
         busca.phones.length
-          ? admin.from("contacts").select(campos).eq("organization_id", org).eq("is_anonymized", false).is("is_merged_into", null).in("phone_number", busca.phones)
+          ? admin
+              .from("contacts")
+              .select(campos)
+              .eq("organization_id", org)
+              .eq("is_anonymized", false)
+              .is("is_merged_into", null)
+              .in("phone_number", busca.phones)
           : Promise.resolve({ data: [] }),
         busca.lids.length
-          ? admin.from("contacts").select(campos).eq("organization_id", org).eq("is_anonymized", false).is("is_merged_into", null).in("wa_lid", busca.lids)
+          ? admin
+              .from("contacts")
+              .select(campos)
+              .eq("organization_id", org)
+              .eq("is_anonymized", false)
+              .is("is_merged_into", null)
+              .in("wa_lid", busca.lids)
           : Promise.resolve({ data: [] }),
       ]);
-      type Linha = { id: string; name: string | null; phone_number: string | null; wa_lid: string | null };
+      type Linha = {
+        id: string;
+        name: string | null;
+        phone_number: string | null;
+        wa_lid: string | null;
+      };
       return [...((porTelefone.data ?? []) as Linha[]), ...((porLid.data ?? []) as Linha[])];
     },
     async audit(entry) {

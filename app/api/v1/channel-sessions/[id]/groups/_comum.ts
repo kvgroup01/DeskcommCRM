@@ -19,7 +19,10 @@ export const idDaSessao = z.string().uuid();
  * O grupo vai no caminho SEM o `@g.us` (`/groups/1203630…/participants`): o `@`
  * codificado no caminho é a forma mais fácil de um proxy reescrever a URL.
  */
-export const idDoGrupo = z.string().regex(/^[\d-]+$/).transform((d) => `${d}@g.us`);
+export const idDoGrupo = z
+  .string()
+  .regex(/^[\d-]+$/)
+  .transform((d) => `${d}@g.us`);
 
 /** Telefone como a equipe digita: com ou sem `+`, espaço, traço e parênteses. */
 export const telefoneDigitado = z
@@ -32,7 +35,8 @@ const RESPOSTA: Record<GestaoDeGrupoError["code"], { status: number; message: st
   canal_sem_gestao: { status: 409, message: "Esta conexão não administra grupos." },
   nao_confirmado: {
     status: 502,
-    message: "O WhatsApp não aplicou a mudança. O número conectado precisa ser administrador do grupo.",
+    message:
+      "O WhatsApp não aplicou a mudança. O número conectado precisa ser administrador do grupo.",
   },
   sem_whatsapp: { status: 422, message: "Nenhum dos telefones informados tem WhatsApp." },
 };
@@ -42,7 +46,8 @@ export function falhaDeGestao(err: unknown, requestId: string): Response {
     const r = RESPOSTA[err.code];
     return fail(err.code, r.message, r.status, { requestId });
   }
-  if (err instanceof z.ZodError) return fail("validation_error", "dados inválidos", 400, { requestId });
+  if (err instanceof z.ZodError)
+    return fail("validation_error", "dados inválidos", 400, { requestId });
   // O resto é o transporte: sessão fora de WORKING, WAHA fora do ar, ou o
   // WhatsApp recusando com erro (não-admin em alguns engines vem como 4xx/5xx).
   logger.warn("grupos: a administração do grupo não passou pelo WhatsApp", {
@@ -65,9 +70,7 @@ export type ContextoDoGrupo = { params: Promise<{ id: string; groupId: string }>
  * `tests/unit/suporte-cobertura-de-efeitos.test.ts` lê o texto de cada handler,
  * então quem escreve chama `requireSupportWrite()` no próprio handler, antes disto.
  */
-export async function prepararPedidoDeGrupo(
-  ctx: ContextoDoGrupo,
-): Promise<
+export async function prepararPedidoDeGrupo(ctx: ContextoDoGrupo): Promise<
   | { ok: false; response: Response }
   | {
       ok: true;

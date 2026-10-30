@@ -15,7 +15,13 @@ vi.mock("@/lib/grupos/gestao", async (orig) => ({
 
 import { requireRole } from "@/lib/auth/require-role";
 import { requireSupportWrite } from "@/lib/impersonate/support";
-import { alterarParticipantes, atualizarDados, GestaoDeGrupoError, lerGrupo, sairDoGrupo } from "@/lib/grupos/gestao";
+import {
+  alterarParticipantes,
+  atualizarDados,
+  GestaoDeGrupoError,
+  lerGrupo,
+  sairDoGrupo,
+} from "@/lib/grupos/gestao";
 
 import { POST as sair } from "./leave/route";
 import { POST as participantes } from "./participants/route";
@@ -23,24 +29,41 @@ import { GET, PATCH } from "./route";
 
 const ORG = "11111111-1111-4111-8111-111111111111";
 const SESS = "22222222-2222-4222-8222-222222222222";
-const ctx = (groupId = "120363000000000001") => ({ params: Promise.resolve({ id: SESS, groupId }) });
+const ctx = (groupId = "120363000000000001") => ({
+  params: Promise.resolve({ id: SESS, groupId }),
+});
 const autorizado = () =>
-  vi.mocked(requireRole).mockResolvedValue({ ok: true, user: { id: "u1" }, org: { orgId: ORG, role: "manager" } } as never);
-const corpo = (b: unknown, method = "POST") => new NextRequest("http://x", { method, body: JSON.stringify(b) });
+  vi
+    .mocked(requireRole)
+    .mockResolvedValue({
+      ok: true,
+      user: { id: "u1" },
+      org: { orgId: ORG, role: "manager" },
+    } as never);
+const corpo = (b: unknown, method = "POST") =>
+  new NextRequest("http://x", { method, body: JSON.stringify(b) });
 
 beforeEach(() => vi.clearAllMocks());
 
 describe("administração de um grupo", () => {
   it("atendente não administra grupo (a rota exige gerente)", async () => {
-    vi.mocked(requireRole).mockResolvedValue({ ok: false, response: new Response(null, { status: 403 }) } as never);
-    const res = await participantes(corpo({ action: "remove", participant_ids: ["5531999990000@c.us"] }), ctx());
+    vi.mocked(requireRole).mockResolvedValue({
+      ok: false,
+      response: new Response(null, { status: 403 }),
+    } as never);
+    const res = await participantes(
+      corpo({ action: "remove", participant_ids: ["5531999990000@c.us"] }),
+      ctx(),
+    );
     expect(res.status).toBe(403);
     expect(requireRole).toHaveBeenCalledWith("manager", expect.anything());
     expect(alterarParticipantes).not.toHaveBeenCalled();
   });
 
   it("suporte em modo leitura é barrado antes do efeito", async () => {
-    vi.mocked(requireSupportWrite).mockResolvedValueOnce(new Response(null, { status: 403 }) as never);
+    vi.mocked(requireSupportWrite).mockResolvedValueOnce(
+      new Response(null, { status: 403 }) as never,
+    );
     const res = await sair(new NextRequest("http://x", { method: "POST" }), ctx());
     expect(res.status).toBe(403);
     expect(sairDoGrupo).not.toHaveBeenCalled();
@@ -66,12 +89,24 @@ describe("administração de um grupo", () => {
 
   it("adicionar normaliza o telefone digitado", async () => {
     autorizado();
-    vi.mocked(alterarParticipantes).mockResolvedValue({ confirmados: ["5531999990000"], naoAplicados: [], semWhatsapp: [] });
-    const res = await participantes(corpo({ action: "add", phones: ["+55 (31) 99999-0000"], organization_id: "outra" }), ctx());
+    vi.mocked(alterarParticipantes).mockResolvedValue({
+      confirmados: ["5531999990000"],
+      naoAplicados: [],
+      semWhatsapp: [],
+    });
+    const res = await participantes(
+      corpo({ action: "add", phones: ["+55 (31) 99999-0000"], organization_id: "outra" }),
+      ctx(),
+    );
     expect(res.status).toBe(200);
     expect(alterarParticipantes).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ organizationId: ORG, action: "add", phones: ["5531999990000"], actorUserId: "u1" }),
+      expect.objectContaining({
+        organizationId: ORG,
+        action: "add",
+        phones: ["5531999990000"],
+        actorUserId: "u1",
+      }),
     );
   });
 
@@ -84,7 +119,10 @@ describe("administração de um grupo", () => {
   it("WhatsApp que não aplicou vira 502 com a explicação de admin", async () => {
     autorizado();
     vi.mocked(alterarParticipantes).mockRejectedValue(new GestaoDeGrupoError("nao_confirmado"));
-    const res = await participantes(corpo({ action: "promote", participant_ids: ["5531999990000@c.us"] }), ctx());
+    const res = await participantes(
+      corpo({ action: "promote", participant_ids: ["5531999990000@c.us"] }),
+      ctx(),
+    );
     expect(res.status).toBe(502);
     const j = (await res.json()) as { error: { code: string; message: string } };
     expect(j.error.code).toBe("nao_confirmado");
@@ -97,7 +135,10 @@ describe("administração de um grupo", () => {
     vi.mocked(atualizarDados).mockResolvedValue({ grupo: {} as never, naoAplicados: [] });
     const res = await PATCH(corpo({ only_admins_send: true }, "PATCH"), ctx());
     expect(res.status).toBe(200);
-    expect(atualizarDados).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ onlyAdminsSend: true }));
+    expect(atualizarDados).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ onlyAdminsSend: true }),
+    );
   });
 
   it("transporte fora do ar é 502 com envelope, não 500 cru", async () => {
@@ -105,6 +146,8 @@ describe("administração de um grupo", () => {
     vi.mocked(sairDoGrupo).mockRejectedValue(new Error("waha_timeout"));
     const res = await sair(new NextRequest("http://x", { method: "POST" }), ctx());
     expect(res.status).toBe(502);
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("channel_unavailable");
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+      "channel_unavailable",
+    );
   });
 });

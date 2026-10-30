@@ -41,7 +41,8 @@ export async function PATCH(req: NextRequest, ctx: ContextoDoGrupo): Promise<Res
   const p = await prepararPedidoDeGrupo(ctx);
   if (!p.ok) return p.response;
   const corpo = patchSchema.safeParse(await req.json().catch(() => null));
-  if (!corpo.success) return fail("validation_error", "dados inválidos", 400, { requestId: p.requestId });
+  if (!corpo.success)
+    return fail("validation_error", "dados inválidos", 400, { requestId: p.requestId });
   try {
     const r = await atualizarDados(p.deps, {
       ...p.alvo,
