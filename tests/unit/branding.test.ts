@@ -843,6 +843,12 @@ const HOSTS_DECLARADOS: Record<string, EntradaDeHost> = {
     motivo:
       "endpoint da plataforma que roda o crawler do Google Places (`lib/prospecting/provider.ts`). É o destino do request, com a chave da PRÓPRIA organização — trocar pelo domínio do revendedor quebraria a chamada, e esconder o nome não esconde para onde o dado vai.",
   },
+  // ── link de convite de grupo: quem abre é a pessoa convidada ──────────────
+  "chat.whatsapp.com": {
+    categoria: "PLATAFORMA",
+    motivo:
+      "prefixo do link de convite de grupo do WhatsApp. `lerLinkDeConvite` (`lib/waha/client.ts`) o acrescenta quando o WAHA devolve só o código do convite, para a tela de administração do grupo mostrar e copiar o link. O código não chama esse host — quem abre o link é a pessoa convidada, no celular dela. Trocar pela marca do revendedor produziria um link que não abre convite nenhum.",
+  },
   // ── identificador de fio: NÃO é destino de chamada nem texto de tela ──────
   "s.whatsapp.net": {
     categoria: "PROTOCOLO",
@@ -1170,6 +1176,10 @@ describe("catraca de host de terceiro no código que embarca", () => {
       // Decisão escrita: painel de chaves da Requesty, o mesmo caso dos outros
       // CONSOLE (o link "Onde pegar a chave" da tela de Credenciais).
       "app.requesty.ai",
+      // Decisão escrita: prefixo do link de convite de grupo, montado por
+      // `lerLinkDeConvite` (`lib/waha/client.ts`). Mesma natureza do `wa.me`:
+      // o produto não fala com o host, quem abre é a pessoa convidada.
+      "chat.whatsapp.com",
       "console.anthropic.com",
       // Decisão escrita: é o painel de chaves do Jev, o mesmo caso dos outros
       // CONSOLE — o link "Onde pegar a chave" da tela de Credenciais.

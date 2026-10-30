@@ -489,6 +489,16 @@ export function CriarGrupo({
   const [chave] = useState(() => crypto.randomUUID());
 
   const lista = telefonesDoTexto(telefones);
+  // O mesmo teto do servidor (`TETO_DE_PARTICIPANTES` em lib/grupos/gestao.ts),
+  // que não entra no bundle do navegador.
+  const motivoDeBloqueio =
+    nome.trim() === ""
+      ? t("Dê um nome ao grupo.")
+      : lista.length === 0
+        ? t("Informe ao menos um telefone.")
+        : lista.length > 50
+          ? t("No máximo 50 telefones por vez.")
+          : null;
 
   async function criar() {
     setOcupado(true);
@@ -554,7 +564,8 @@ export function CriarGrupo({
       )}
       <div>
         <Button
-          disabled={ocupado || nome.trim() === "" || lista.length === 0 || lista.length > 50}
+          disabled={ocupado || motivoDeBloqueio !== null}
+          title={motivoDeBloqueio ?? undefined}
           onClick={() => void criar()}
         >
           {ocupado ? t("Criando…") : t("Criar grupo")}
