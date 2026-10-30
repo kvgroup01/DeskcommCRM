@@ -997,6 +997,15 @@ export const AUDIT_ACTIONS = [
   // decisões opostas e o painel filtra por `action`, não por metadata.
   "channel.group_enabled",
   "channel.group_disabled",
+  // Administração do grupo pelo número conectado (Conexões › Grupos › Gerenciar).
+  // O efeito é FORA do CRM — no WhatsApp de pessoas reais —, então cada escrita
+  // fica na trilha com o que o WhatsApp de fato confirmou (`confirmados`), não
+  // com o que foi pedido.
+  "channel.group_created",
+  "channel.group_participants_changed",
+  "channel.group_info_updated",
+  "channel.group_invite_revoked",
+  "channel.group_left",
   // "Enviar vendas pelo canal da conversa" (doc 76, PR #1819): ligar faz o
   // valor da venda e o telefone do cliente saírem para o provedor do canal.
   "conversions.report_via_channel_updated",

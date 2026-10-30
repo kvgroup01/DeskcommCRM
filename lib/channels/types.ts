@@ -96,6 +96,60 @@ export interface ChannelGroup {
   subject: string | null;
 }
 
+export type GroupParticipantRole = "superadmin" | "admin" | "participant";
+
+/** `id` é o JID cru do WhatsApp: `<digitos>@c.us` ou `<digitos>@lid` (número oculto). */
+export interface ChannelGroupParticipant {
+  id: string;
+  role: GroupParticipantRole;
+}
+
+export interface ChannelGroupDetails {
+  chatId: string;
+  subject: string | null;
+  description: string | null;
+  participants: ChannelGroupParticipant[];
+  /** `null` = o WhatsApp não disse; a tela não inventa o estado da chave. */
+  onlyAdminsSend: boolean | null;
+  onlyAdminsEditInfo: boolean | null;
+}
+
+export type GroupParticipantsAction = "add" | "remove" | "promote" | "demote";
+
+/**
+ * Administração de grupo pelo número conectado. Cada escrita pode RESPONDER OK sem
+ * ter acontecido (o WhatsApp recusa em silêncio quem não é admin, e o WAHA já
+ * devolveu 200 para operação que não ocorreu — issue melgarafael/DeskcommCRM#1428):
+ * quem chama confere a pós-condição relendo o grupo, nunca confia no retorno.
+ */
+export interface ChannelGroupAdmin {
+  getGroup(input: { sessionRef: string; chatId: string }): Promise<ChannelGroupDetails>;
+  createGroup(input: { sessionRef: string; subject: string; participantIds: string[] }): Promise<{ chatId: string }>;
+  changeParticipants(input: {
+    sessionRef: string;
+    chatId: string;
+    action: GroupParticipantsAction;
+    participantIds: string[];
+  }): Promise<void>;
+  setSubject(input: { sessionRef: string; chatId: string; subject: string }): Promise<void>;
+  setDescription(input: { sessionRef: string; chatId: string; description: string }): Promise<void>;
+  setSettings(input: {
+    sessionRef: string;
+    chatId: string;
+    onlyAdminsSend?: boolean;
+    onlyAdminsEditInfo?: boolean;
+  }): Promise<void>;
+  getInviteLink(input: { sessionRef: string; chatId: string }): Promise<string>;
+  revokeInviteLink(input: { sessionRef: string; chatId: string }): Promise<string>;
+  leaveGroup(input: { sessionRef: string; chatId: string }): Promise<void>;
+  /**
+   * O JID pelo qual o WhatsApp endereça este telefone, e os outros JIDs da mesma
+   * pessoa (`@lid` e telefone) para conferir a lista de participantes depois.
+   * `null` = não tem WhatsApp.
+   */
+  resolveParticipant(input: { sessionRef: string; phone: string }): Promise<{ id: string; aliases: string[] } | null>;
+}
+
 /**
  * A organização em nome de quem a operação de canal acontece.
  *
@@ -395,6 +449,9 @@ export interface ChannelAdapter {
 
   /** Liga/desliga o recebimento de grupos na sessão; `true` só com a troca confirmada. */
   setGroupIntake?(input: { sessionRef: string; receive: boolean }): Promise<boolean>;
+
+  /** Criar grupo, membros, nome, convite, sair. Ausente = o canal não administra grupo. */
+  groupAdmin?: ChannelGroupAdmin;
 
   /**
    * Envia uma DEFINIÇÃO APROVADA — o único caminho de volta quando a janela de

@@ -566,6 +566,119 @@ export class WahaClient {
     return grupos;
   }
 
+  // ── Administração de grupo ──────────────────────────────────────────────
+  // Escrita aqui só diz "o WAHA aceitou o pedido", nunca "aconteceu": quem
+  // confere a pós-condição é `lib/grupos/gestao.ts`, relendo o grupo.
+
+  private urlDoGrupo(session: string, chatId: string, resto = ""): string {
+    return `${this.baseUrl}/api/${encodeURIComponent(session)}/groups/${encodeURIComponent(chatId)}${resto}`;
+  }
+
+  private async pedirAoGrupo(
+    operacao: string,
+    url: string,
+    method: "GET" | "POST" | "PUT",
+    corpo?: unknown,
+  ): Promise<unknown> {
+    const res = await this.fetchComTeto(url, {
+      method,
+      headers: {
+        "X-Api-Key": this.apiKey,
+        Accept: "application/json",
+        ...(corpo === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: corpo === undefined ? undefined : JSON.stringify(corpo),
+    });
+    if (!res.ok) {
+      const detalhe = await res.text().catch(() => "");
+      throw new Error(`waha_group_${operacao}_${res.status}${detalhe ? `: ${detalhe.slice(0, 200)}` : ""}`);
+    }
+    const texto = await res.text().catch(() => "");
+    if (!texto) return null;
+    try {
+      return JSON.parse(texto) as unknown;
+    } catch {
+      return texto;
+    }
+  }
+
+  async lerGrupo(session: string, chatId: string): Promise<DetalheDoGrupo> {
+    const bruto = await this.pedirAoGrupo("get", this.urlDoGrupo(session, chatId), "GET");
+    const detalhe = lerDetalheDoGrupo(bruto, chatId);
+    // `/participants/v2` devolve o papel já normalizado nos dois engines; o
+    // detalhe do grupo só o traz no formato do engine. Servidor sem a v2 (404)
+    // fica com o que o detalhe trouxe.
+    try {
+      const v2 = await this.pedirAoGrupo("participants", this.urlDoGrupo(session, chatId, "/participants/v2"), "GET");
+      const participantes = lerParticipantes(v2);
+      if (participantes.length > 0) detalhe.participants = participantes;
+    } catch {
+      // segue com os participantes do detalhe
+    }
+    return detalhe;
+  }
+
+  async criarGrupo(session: string, nome: string, participantes: string[]): Promise<{ chatId: string }> {
+    const bruto = await this.pedirAoGrupo("create", `${this.baseUrl}/api/${encodeURIComponent(session)}/groups`, "POST", {
+      name: nome,
+      participants: participantes.map((id) => ({ id })),
+    });
+    const chatId = chatIdDoGrupo(bruto);
+    if (!chatId) throw new Error("waha_group_create_sem_id");
+    return { chatId };
+  }
+
+  async alterarParticipantes(
+    session: string,
+    chatId: string,
+    acao: "add" | "remove" | "promote" | "demote",
+    participantes: string[],
+  ): Promise<void> {
+    const caminho = { add: "/participants/add", remove: "/participants/remove", promote: "/admin/promote", demote: "/admin/demote" }[acao];
+    await this.pedirAoGrupo(acao, this.urlDoGrupo(session, chatId, caminho), "POST", {
+      participants: participantes.map((id) => ({ id })),
+    });
+  }
+
+  async definirNomeDoGrupo(session: string, chatId: string, nome: string): Promise<void> {
+    await this.pedirAoGrupo("subject", this.urlDoGrupo(session, chatId, "/subject"), "PUT", { subject: nome });
+  }
+
+  async definirDescricaoDoGrupo(session: string, chatId: string, descricao: string): Promise<void> {
+    await this.pedirAoGrupo("description", this.urlDoGrupo(session, chatId, "/description"), "PUT", { description: descricao });
+  }
+
+  async definirSoAdminsEnviam(session: string, chatId: string, soAdmins: boolean): Promise<void> {
+    await this.pedirAoGrupo("messages_admin_only", this.urlDoGrupo(session, chatId, "/settings/security/messages-admin-only"), "PUT", {
+      adminsOnly: soAdmins,
+    });
+  }
+
+  async definirSoAdminsEditam(session: string, chatId: string, soAdmins: boolean): Promise<void> {
+    await this.pedirAoGrupo("info_admin_only", this.urlDoGrupo(session, chatId, "/settings/security/info-admin-only"), "PUT", {
+      adminsOnly: soAdmins,
+    });
+  }
+
+  async lerLinkDeConvite(session: string, chatId: string): Promise<string> {
+    const link = lerLinkDeConvite(await this.pedirAoGrupo("invite", this.urlDoGrupo(session, chatId, "/invite-code"), "GET"));
+    if (!link) throw new Error("waha_group_invite_sem_codigo");
+    return link;
+  }
+
+  async revogarLinkDeConvite(session: string, chatId: string): Promise<string> {
+    const link = lerLinkDeConvite(
+      await this.pedirAoGrupo("invite_revoke", this.urlDoGrupo(session, chatId, "/invite-code/revoke"), "POST"),
+    );
+    // Revogar sem devolver o novo é aceitável — o link antigo já morreu; o novo
+    // é lido em seguida.
+    return link ?? this.lerLinkDeConvite(session, chatId);
+  }
+
+  async sairDoGrupo(session: string, chatId: string): Promise<void> {
+    await this.pedirAoGrupo("leave", this.urlDoGrupo(session, chatId, "/leave"), "POST");
+  }
+
   /**
    * Liga ou desliga o recebimento de grupos NESTA sessão. Só devolve `true` quando o GET
    * seguinte confirma a troca: o WAHA já respondeu 200 para operação que não aconteceu
@@ -900,6 +1013,92 @@ export class WahaClient {
  * erro; lá a classificação cai no texto e degrada para "indeterminada", que é a
  * verdade disponível.
  */
+// ── Leitura das respostas de grupo ──────────────────────────────────────────
+// NOWEB e WEBJS devolvem formas diferentes para o mesmo grupo (`id` string ou
+// `{ _serialized }`, `subject` ou `name`, `admin: "admin"` ou `isAdmin: true`).
+// As funções abaixo aceitam as duas e nunca lançam: campo que não veio vira
+// `null`, não um palpite.
+
+export interface DetalheDoGrupo {
+  chatId: string;
+  subject: string | null;
+  description: string | null;
+  participants: Array<{ id: string; role: "superadmin" | "admin" | "participant" }>;
+  onlyAdminsSend: boolean | null;
+  onlyAdminsEditInfo: boolean | null;
+}
+
+function comoObjeto(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+function jidDe(v: unknown): string | null {
+  if (typeof v === "string") return v;
+  const o = comoObjeto(v);
+  return o && typeof o._serialized === "string" ? o._serialized : null;
+}
+
+function textoOuNull(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+/** O chatId de um grupo recém-criado: `id`, `gid` ou `JID`, string ou serializado. */
+export function chatIdDoGrupo(bruto: unknown): string | null {
+  const o = comoObjeto(bruto);
+  if (!o) return null;
+  for (const chave of ["id", "gid", "JID"]) {
+    const jid = jidDe(o[chave]);
+    if (jid?.endsWith("@g.us")) return jid;
+  }
+  return null;
+}
+
+export function lerParticipantes(bruto: unknown): DetalheDoGrupo["participants"] {
+  if (!Array.isArray(bruto)) return [];
+  const lista: DetalheDoGrupo["participants"] = [];
+  for (const item of bruto) {
+    const o = comoObjeto(item);
+    const id = o ? jidDe(o.id) ?? jidDe(o.JID) : null;
+    if (!o || !id) continue;
+    const papel = o.role ?? o.admin;
+    const role =
+      papel === "superadmin" || o.isSuperAdmin === true ? "superadmin"
+      : papel === "admin" || o.isAdmin === true ? "admin"
+      : "participant";
+    // v2 marca quem saiu como `left`; quem saiu não é participante.
+    if (papel === "left") continue;
+    lista.push({ id, role });
+  }
+  return lista;
+}
+
+export function lerDetalheDoGrupo(bruto: unknown, chatIdPedido: string): DetalheDoGrupo {
+  const o = comoObjeto(bruto) ?? {};
+  // WEBJS guarda descrição, participantes e travas em `groupMetadata`.
+  const meta = comoObjeto(o.groupMetadata) ?? o;
+  const booleano = (v: unknown) => (typeof v === "boolean" ? v : null);
+  return {
+    chatId: jidDe(o.id) ?? chatIdPedido,
+    subject: textoOuNull(o.subject) ?? textoOuNull(o.name) ?? textoOuNull(meta.subject),
+    description: textoOuNull(meta.desc) ?? textoOuNull(meta.description) ?? textoOuNull(o.desc),
+    participants: lerParticipantes(meta.participants ?? o.participants),
+    // `announce` = só admins enviam; `restrict` = só admins editam os dados.
+    onlyAdminsSend: booleano(meta.announce ?? o.announce),
+    onlyAdminsEditInfo: booleano(meta.restrict ?? o.restrict),
+  };
+}
+
+/** O link de convite completo, venha ele como texto, `{ code }` ou `{ inviteCode }`. */
+export function lerLinkDeConvite(bruto: unknown): string | null {
+  const o = comoObjeto(bruto);
+  const valor = typeof bruto === "string" ? bruto : textoOuNull(o?.link) ?? textoOuNull(o?.inviteCode) ?? textoOuNull(o?.code);
+  const limpo = valor?.trim().replace(/^"|"$/g, "") ?? "";
+  if (!limpo) return null;
+  if (/^https?:\/\//.test(limpo)) return limpo;
+  if (!/^[A-Za-z0-9]+$/.test(limpo)) return null;
+  return `https://chat.whatsapp.com/${limpo}`;
+}
+
 export function wahaFriendlyError(erro: unknown): string {
   const falha = classificarFalhaDeAlcance(erro);
   if (falha !== "indeterminada") {

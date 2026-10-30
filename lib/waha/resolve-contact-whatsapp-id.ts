@@ -102,6 +102,27 @@ export async function resolvePhoneJidDigitsForCall(
   return r ? phoneJidDigitsFromCheckResult(r) : null;
 }
 
+/**
+ * O JID para pôr este telefone num grupo, e os outros nomes da mesma pessoa.
+ * Sem fallback para o número digitado: adicionar a grafia errada do nono dígito
+ * "dá certo" no WAHA e ninguém entra. `aliases` existe porque o WhatsApp lista
+ * participante ora por `@lid`, ora por telefone — conferir quem entrou comparando
+ * um só JID acusaria falha que não houve. `null` = nenhuma grafia tem WhatsApp,
+ * ou a consulta falhou.
+ */
+export async function resolveParticipantJidForGroup(
+  client: WahaClient,
+  session: string,
+  phone: string,
+): Promise<{ id: string; aliases: string[] } | null> {
+  const r = await firstExistingOnWhatsapp(client, session, phone);
+  const id = r ? sendChatIdFromCheckResult(r) : null;
+  if (!r || !id) return null;
+  const pn = phoneJidDigitsFromCheckResult(r);
+  const aliases = [id, r.chatId ?? null, pn ? `${pn}@c.us` : null].filter((x): x is string => Boolean(x));
+  return { id, aliases: [...new Set(aliases)] };
+}
+
 /** Consulta WAHA; null = não achou ou falhou (caller usa fallback). */
 export async function resolveWhatsappIdForContactCard(
   client: WahaClient,

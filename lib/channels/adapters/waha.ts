@@ -11,6 +11,7 @@ import { getWahaClient } from "@/lib/waha/client";
 import { wahaSendPlanFor } from "@/lib/waha/media-send";
 import {
   resolveCanonicalCusChatId,
+  resolveParticipantJidForGroup,
   resolvePhoneJidDigitsForCall,
   resolveWhatsappIdForContactCard,
 } from "@/lib/waha/resolve-contact-whatsapp-id";
@@ -65,6 +66,13 @@ function enderecoDaMensagem(input: { recipient: string | null; externalId: strin
  */
 function idCompletoDaMensagem(externalId: string, chatId: string): string {
   return externalId.includes("_") ? externalId : `true_${chatId}_${bareWaMessageId(externalId)}`;
+}
+
+/** Administração de grupo sem WAHA configurado é erro de instalação, não "nada a fazer". */
+function wahaOuFalha() {
+  const client = getWahaClient();
+  if (!client) throw new Error("waha_not_configured");
+  return client;
 }
 
 export const wahaAdapter: ChannelAdapter = {
@@ -226,6 +234,23 @@ export const wahaAdapter: ChannelAdapter = {
     const client = getWahaClient();
     if (!client) return false;
     return client.definirRecebimentoDeGrupos(input.sessionRef, input.receive);
+  },
+
+  groupAdmin: {
+    getGroup: (i) => wahaOuFalha().lerGrupo(i.sessionRef, i.chatId),
+    createGroup: (i) => wahaOuFalha().criarGrupo(i.sessionRef, i.subject, i.participantIds),
+    changeParticipants: (i) => wahaOuFalha().alterarParticipantes(i.sessionRef, i.chatId, i.action, i.participantIds),
+    setSubject: (i) => wahaOuFalha().definirNomeDoGrupo(i.sessionRef, i.chatId, i.subject),
+    setDescription: (i) => wahaOuFalha().definirDescricaoDoGrupo(i.sessionRef, i.chatId, i.description),
+    async setSettings(i) {
+      const client = wahaOuFalha();
+      if (i.onlyAdminsSend !== undefined) await client.definirSoAdminsEnviam(i.sessionRef, i.chatId, i.onlyAdminsSend);
+      if (i.onlyAdminsEditInfo !== undefined) await client.definirSoAdminsEditam(i.sessionRef, i.chatId, i.onlyAdminsEditInfo);
+    },
+    getInviteLink: (i) => wahaOuFalha().lerLinkDeConvite(i.sessionRef, i.chatId),
+    revokeInviteLink: (i) => wahaOuFalha().revogarLinkDeConvite(i.sessionRef, i.chatId),
+    leaveGroup: (i) => wahaOuFalha().sairDoGrupo(i.sessionRef, i.chatId),
+    resolveParticipant: (i) => resolveParticipantJidForGroup(wahaOuFalha(), i.sessionRef, i.phone),
   },
 
   /**
