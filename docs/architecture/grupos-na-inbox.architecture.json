@@ -86,6 +86,30 @@
       "type": "frontend",
       "label": "Aviso ao atendente",
       "sublabel": "push assina message.group_received"
+    },
+    {
+      "id": "gestao",
+      "lane": "motor",
+      "col": 3,
+      "type": "backend",
+      "label": "lib/grupos/gestao.ts",
+      "sublabel": "criar, membros, admins, convite, sair (groups/[groupId])"
+    },
+    {
+      "id": "waha-admin",
+      "lane": "canal",
+      "col": 4,
+      "type": "backend",
+      "label": "groupAdmin do adapter WAHA",
+      "sublabel": "rotas de grupo do WAHA: participantes, convite, sair"
+    },
+    {
+      "id": "audit-grupo",
+      "lane": "dados",
+      "col": 3,
+      "type": "database",
+      "label": "api_audit_log channel.group_*",
+      "sublabel": "contagem confirmada, sem telefone"
     }
   ],
   "edges": [
@@ -97,6 +121,9 @@
     { "from": "ingest", "to": "evento", "label": "emite message.group_received" },
     { "from": "evento", "to": "chat", "label": "realtime atualiza a tela" },
     { "from": "evento", "to": "push", "label": "notifica atendente" },
-    { "from": "conversa", "to": "chat", "label": "etiqueta Grupo + remetente" }
+    { "from": "conversa", "to": "chat", "label": "etiqueta Grupo + remetente" },
+    { "from": "conexoes", "to": "gestao", "label": "Gerenciar / Criar grupo" },
+    { "from": "gestao", "to": "waha-admin", "label": "escreve e relê o grupo" },
+    { "from": "gestao", "to": "audit-grupo", "label": "grava o que o WhatsApp confirmou" }
   ]
 }

@@ -176,7 +176,8 @@ Evidência em `evidence/`.
 
 **Fora desta versão:** histórico anterior ao ligar; lista de atendentes por grupo (a
 saída 2, que mexe em `fn_can_view_conversation`); moderação, membros e criar ou sair de
-grupo (o escopo da #1428); grupos em canais `limited`; **exportação e anonimização LGPD
+grupo (o escopo da #1428; **entrou depois** — ver "Adendo: administração do grupo" no
+fim); grupos em canais `limited`; **exportação e anonimização LGPD
 do participante de grupo que NÃO é contato do CRM** (ver abaixo).
 
 **LGPD — mensagens de grupo.** A mensagem de grupo mora na conversa do contato
@@ -219,3 +220,30 @@ fica isolado em `lib/grupos/ingest.ts` para reduzir conflito.
   ela vem **desligada por padrão**, grupo a grupo.
 - Tela com porta (o botão fica dentro de Conexões, que já está na navegação).
 - Prova na tela.
+
+## Adendo: administração do grupo (30/10/2026)
+
+A parte de moderação que este desenho deixou de fora entrou como camada separada, sem
+tabela nova e sem tocar a entrada de mensagens: em **Conexões › Grupos**, "Criar grupo"
+e "Gerenciar" administram o grupo pelo número conectado — membros (adicionar por
+telefone, remover), administradores (promover/rebaixar), nome, descrição, as travas "só
+admins enviam" e "só admins editam os dados", link de convite (ver e revogar) e sair.
+
+- **Onde mora:** `lib/grupos/gestao.ts` (regra), `groupAdmin` em `ChannelAdapter`
+  (`lib/channels/types.ts`), implementado só no WAHA (canal com `groups: "full"`), e as
+  rotas `app/api/v1/channel-sessions/[id]/groups` (POST cria) e `…/groups/[groupId]`
+  (`/`, `/participants`, `/invite`, `/leave`). Gerente+, como a lista.
+- **Régua: o que o WhatsApp confirmou.** Toda escrita relê o grupo e só conta como feito o
+  que mudou de fato — o WhatsApp recusa em silêncio quem não é admin e quem só aceita
+  convite. Nada aplicado responde 502 `nao_confirmado`. A comparação aceita `@lid` e
+  telefone para a mesma pessoa (`resolveParticipantJidForGroup` devolve os dois).
+- **Independente da inbox.** Criar um grupo não o liga aqui; sair de um grupo ligado o
+  deixa órfão na lista, onde a chave já pode ser desligada.
+- **Auditoria** (`channel.group_created`, `…_participants_changed`, `…_info_updated`,
+  `…_invite_revoked`, `…_left`) guarda contagens e o id do grupo, nunca o telefone do
+  participante — pelo mesmo motivo de LGPD da seção acima.
+- **Anti-banimento:** no máximo 50 telefones por pedido, resolvidos um a um
+  (`check-exists`); criar aceita `Idempotency-Key`, e a tela sempre manda.
+- **Não medido contra WhatsApp real:** os endpoints e formatos de resposta seguem a
+  documentação do WAHA e foram escritos tolerantes a NOWEB e WEBJS
+  (`lib/waha/grupo-respostas.test.ts`); a prova num número pareado está pendente.
